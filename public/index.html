@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice Pro Max</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0b1220; --panel: #121a2b; --panel-2: #0f1626; --line: rgba(255,255,255,.09);
+    --text: #e6edf7; --muted: #93a1b8; --sky: #38bdf8; --sky-2: #7dd3fc; --sky-d: #0ea5e9;
+    --danger: #fb7185; --ok: #34d399; --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: Inter, system-ui, sans-serif; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 22px 18px 70px; }
+
+  /* Brand header */
+  .brand { background: linear-gradient(135deg, var(--sky-d) 0%, var(--sky) 55%, var(--sky-2) 100%);
+    border-radius: 14px; padding: 22px 26px; text-align: center; color: #fff;
+    box-shadow: 0 8px 22px rgba(14,165,233,.22); }
+  .brand h1 { font-size: 1.85em; font-weight: 800; margin: 0 0 6px; letter-spacing: -.01em; }
+  .brand .subtitle { margin: 0 0 12px; font-size: .98em; opacity: .92; font-weight: 500; }
+  .brand .credits { margin: 0; font-size: .88em; opacity: .95; }
+  .brand .credits a { color: #f0f9ff; font-weight: 600; text-decoration: underline;
+    text-decoration-color: rgba(255,255,255,.4); }
+  .brand .credits a:hover { text-decoration-color: rgba(255,255,255,.9); }
+
+  /* Global format row */
+  .toolbar { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 16px 0 6px; }
+  .toolbar label { font-size: .8em; color: var(--muted); font-weight: 600; }
+  select, input[type=file] { background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; font-size: 14px; font-family: inherit; }
+  select:focus, textarea:focus { outline: none; border-color: var(--sky); }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 4px; margin: 18px 0 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .tab { appearance: none; background: none; border: none; color: var(--muted);
+    padding: 11px 15px; font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--sky-2); border-bottom-color: var(--sky); }
+  .panel { display: none; padding-top: 20px; }
+  .panel.active { display: block; }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; }
+  .grid { display: grid; grid-template-columns: 1fr 320px; gap: 18px; align-items: start; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+  label.field { display: block; font-size: .72em; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 8px; font-weight: 700; }
+  textarea { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 10px; padding: 13px; font-size: 15px; line-height: 1.6; font-family: inherit; resize: vertical; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 8px 0 0; line-height: 1.5; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
+  .grow { flex: 1; min-width: 160px; }
+
+  button.go { background: linear-gradient(135deg, var(--sky-d), var(--sky)); color: #04121f;
+    border: none; border-radius: 10px; font-weight: 700; font-size: 15px; padding: 12px 22px; cursor: pointer;
+    font-family: inherit; box-shadow: 0 2px 10px rgba(14,165,233,.3); }
+  button.go:hover { filter: brightness(1.06); }
+  button.go:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 9px; padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  button.ghost:hover { border-color: var(--sky); }
+
+  .out { margin-top: 16px; }
+  audio { width: 100%; margin-top: 6px; }
+  a.dl { display: inline-block; margin-top: 10px; font-size: 13px; color: var(--sky-2); text-decoration: none;
+    border: 1px solid var(--line); padding: 8px 13px; border-radius: 8px; }
+  a.dl:hover { border-color: var(--sky); }
+  .status { font-size: 13px; margin-top: 12px; min-height: 18px; color: var(--muted); }
+  .status.err { color: var(--danger); } .status.ok { color: var(--ok); }
+
+  /* Tag palette */
+  .taggrp { margin-top: 14px; }
+  .taggrp h4 { margin: 0 0 8px; font-size: .82em; color: var(--sky-2); font-weight: 700; }
+  .tagrow { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { background: rgba(56,189,248,.08); border: 1px solid rgba(56,189,248,.25); color: var(--text);
+    border-radius: 8px; padding: 5px 10px; font-size: 12.5px; cursor: pointer; font-family: inherit; }
+  .chip:hover { background: rgba(56,189,248,.18); }
+
+  /* speaker blocks */
+  .spk { background: rgba(56,189,248,.05); border: 1px solid rgba(56,189,248,.2); border-radius: 10px;
+    padding: 12px; margin-top: 10px; }
+  .spk h4 { margin: 0 0 8px; font-size: .85em; }
+  .seg { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
+  .seg .who { font-size: 12px; color: var(--sky-2); font-weight: 700; }
+  .seg .txt { font-size: 13.5px; color: var(--muted); margin: 3px 0 4px; }
+
+  /* login */
+  .login { position: fixed; inset: 0; background: rgba(4,10,20,.92); display: none; align-items: center;
+    justify-content: center; z-index: 100; }
+  .login.show { display: flex; }
+  .login .box { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 26px; width: 320px; }
+  .login h3 { margin: 0 0 14px; }
+  .login input { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 9px; padding: 11px; font-size: 15px; font-family: inherit; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+  <div class="login" id="login">
+    <div class="box">
+      <h3>Masuk</h3>
+      <input type="text" id="loginUser" placeholder="Username" autocomplete="username" />
+      <input type="password" id="loginPass" placeholder="Password" autocomplete="current-password" />
+      <button class="go" id="loginBtn" style="width:100%">Masuk</button>
+      <div class="status err" id="loginErr"></div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <!-- ================== HEADER / BRANDING ==================
+         Untuk mengganti ke brand/donasimu sendiri, ubah teks & link di bawah.
+         CATATAN: link Saweria & TikTok di bawah mengarah ke akun "Korobroo"
+         (pembuat asli), BUKAN akunmu. Ganti kalau ingin donasi masuk ke kamu. -->
+    <div class="brand">
+      <h1>🎙️ Voice Pro Max</h1>
+      <p class="subtitle">Voice Pro Max · 100+ bahasa · kloning suara · sutradara teks AI · podcast &amp; buku audio</p>
+      <p class="credits">Dibuat oleh <a href="https://www.tiktok.com/@korobroo" target="_blank" rel="noopener">Korobroo</a>
+        — Licensed by Korobroo 2026. Dukung lewat
+        <a href="https://saweria.co/korobroo" target="_blank" rel="noopener">Saweria</a> · Follow
+        <a href="https://www.tiktok.com/@korobroo" target="_blank" rel="noopener">TikTok</a>.</p>
+    </div>
+    <!-- ======================================================= -->
+
+    <div class="toolbar">
+      <label>Format keluaran</label>
+      <select id="fmt"><option value="mp3">mp3</option><option value="wav">wav</option></select>
+      <span class="hint" id="cfgHint"></span>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="tts">TTS</button>
+      <button class="tab" data-tab="expr">Ekspresi</button>
+      <button class="tab" data-tab="clone">Kloning</button>
+      <button class="tab" data-tab="pod">Podcast</button>
+      <button class="tab" data-tab="book">Buku Audio</button>
+      <button class="tab" data-tab="batch">Batch</button>
+    </div>
+
+    <!-- TTS -->
+    <div class="panel active" id="p-tts">
+      <div class="grid">
+        <div class="card">
+          <label class="field">Teks</label>
+          <textarea id="tts-text" rows="5" placeholder="Tulis teks di sini...">Halo! Ini Voice Pro Max — pengubah teks jadi suara dalam 100+ bahasa.</textarea>
+          <div class="row">
+            <select id="tts-voice" class="grow"></select>
+            <button class="ghost" data-ex="tts">Contoh</button>
+          </div>
+          <div class="row"><button class="go" id="tts-go">Hasilkan suara</button></div>
+          <div class="status" id="tts-status"></div>
+        </div>
+        <div class="card out" id="tts-out"><label class="field">Hasil</label><div class="hint">Belum ada audio.</div></div>
+      </div>
+    </div>
+
+    <!-- Ekspresi -->
+    <div class="panel" id="p-expr">
+      <div class="card">
+        <label class="field">Teks (sisipkan tag lewat tombol di bawah)</label>
+        <textarea id="expr-text" rows="5" placeholder="Ketik teks, klik chip untuk menyisipkan tag...">Aku senang sekali hari ini!</textarea>
+        <div id="tag-palette"></div>
+        <div class="row">
+          <select id="expr-voice" class="grow"></select>
+          <button class="ghost" data-ex="expr">Contoh</button>
+        </div>
+        <div class="row"><button class="go" id="expr-go">Hasilkan suara</button></div>
+        <div class="status" id="expr-status"></div>
+        <div class="out" id="expr-out"></div>
+      </div>
+    </div>
+
+    <!-- Kloning -->
+    <div class="panel" id="p-clone">
+      <div class="grid">
+        <div class="card">
+          <label class="field">Teks yang akan dibacakan</label>
+          <textarea id="clone-text" rows="3" placeholder="Teks dengan suara hasil kloning...">Ini suara hasil kloning dari audio referensi.</textarea>
+          <div class="row">
+            <div class="grow">
+              <label class="field">Audio referensi (unggah, ≤30 detik)</label>
+              <input type="file" id="clone-file" accept="audio/*" />
+            </div>
+          </div>
+          <div class="row grow">
+            <div class="grow">
+              <label class="field">Atau pilih preset bawaan</label>
+              <select id="clone-preset" class="grow"></select>
+            </div>
+          </div>
+          <label class="field" style="margin-top:12px">Transkrip audio referensi (opsional, tingkatkan kualitas)</label>
+          <textarea id="clone-reftext" rows="2" placeholder="Kalimat persis yang diucapkan di audio referensi..."></textarea>
+          <div class="row"><button class="go" id="clone-go">Kloning &amp; hasilkan</button></div>
+          <div class="hint">⚠️ Hanya klon suara yang kamu punya haknya. Dilarang meniru suara orang tanpa izin.</div>
+          <div class="status" id="clone-status"></div>
+        </div>
+        <div class="card out" id="clone-out"><label class="field">Hasil</label><div class="hint">Belum ada audio.</div></div>
+      </div>
+    </div>
+
+    <!-- Podcast -->
+    <div class="panel" id="p-pod">
+      <div class="card">
+        <label class="field">Skrip (format "Speaker 0: ...", satu baris per giliran bicara)</label>
+        <textarea id="pod-script" rows="7" placeholder="Speaker 0: Selamat datang di podcast kita!&#10;Speaker 1: Halo, senang bisa hadir di sini.">Speaker 0: Selamat datang di podcast kita hari ini!
+Speaker 1: Terima kasih, senang sekali bisa hadir di sini.
+Speaker 0: Jadi, apa topik kita kali ini?
+Speaker 1: Kita akan bahas masa depan AI suara.</textarea>
+        <button class="ghost" data-ex="pod" style="margin-top:10px">Contoh</button>
+        <div id="pod-speakers"></div>
+        <div class="row"><button class="go" id="pod-go">Hasilkan podcast</button></div>
+        <div class="status" id="pod-status"></div>
+        <div class="out" id="pod-out"></div>
+      </div>
+    </div>
+
+    <!-- Buku Audio -->
+    <div class="panel" id="p-book">
+      <div class="card">
+        <label class="field">Naskah (Speaker 0 = narator; beri "Speaker 1:" untuk dialog tokoh)</label>
+        <textarea id="book-script" rows="7" placeholder="Speaker 0: Mercusuar tua itu sudah lama diam.&#10;Speaker 1: Apakah ada orang di sini?">Speaker 0: Mercusuar tua itu sudah lama sekali diam.
+Speaker 1: Apakah ada orang di sini?
+Speaker 0: teriak Tom sambil menaiki tangga yang berderit. Yang menjawab hanyalah keheningan.</textarea>
+        <button class="ghost" data-ex="book" style="margin-top:10px">Contoh</button>
+        <div id="book-speakers"></div>
+        <div class="row"><button class="go" id="book-go">Hasilkan buku audio</button></div>
+        <div class="status" id="book-status"></div>
+        <div class="out" id="book-out"></div>
+      </div>
+    </div>
+
+    <!-- Batch -->
+    <div class="panel" id="p-batch">
+      <div class="card">
+        <label class="field">Teks batch (satu baris = satu file audio)</label>
+        <textarea id="batch-text" rows="7" placeholder="Baris pertama&#10;Baris kedua&#10;Baris ketiga">Selamat pagi, semuanya.
+Ini adalah baris kedua.
+Dan ini baris ketiga.</textarea>
+        <div class="row"><select id="batch-voice" class="grow"></select></div>
+        <div class="row"><button class="go" id="batch-go">Hasilkan semua</button></div>
+        <div class="status" id="batch-status"></div>
+        <div class="out" id="batch-out"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let TOKEN = localStorage.getItem("vpm_token") || "";
+let VOICES = { presets: [], bosonPresets: ["default"] };
+
+// ---- tag data (dari Higgs Audio v3) ----
+const TAGS = {
+  emotion: { label: "😊 Emosi (letakkan di awal kalimat)", items: {
+    affection:"Kehangatan", amusement:"Geli/tawa ringan", anger:"Marah", arousal:"Gairah meningkat",
+    awe:"Kagum", bitterness:"Pahit", confusion:"Bingung", contemplation:"Merenung", contentment:"Puas tenang",
+    determination:"Bertekad", disgust:"Jijik", elation:"Sukacita", enthusiasm:"Antusias", fear:"Takut",
+    helplessness:"Tak berdaya", longing:"Rindu", pride:"Bangga", relief:"Lega", sadness:"Sedih",
+    shame:"Malu", surprise:"Terkejut" } },
+  prosody: { label: "🎵 Prosodi (kecepatan, nada, jeda)", items: {
+    speed_very_slow:"Sangat lambat", speed_slow:"Lambat", speed_fast:"Cepat", speed_very_fast:"Sangat cepat",
+    pitch_low:"Nada rendah", pitch_high:"Nada tinggi", expressive_high:"Lebih ekspresif",
+    expressive_low:"Datar/monoton", pause:"Jeda singkat", long_pause:"Jeda panjang" } },
+  style: { label: "🎭 Gaya (di awal kalimat)", items: {
+    singing:"Bernyanyi", shouting:"Berteriak", whispering:"Berbisik" } },
+  sfx: { label: "🔊 Efek suara (dekat kata terkait)", items: {
+    cough:"Batuk", laughter:"Tertawa", crying:"Menangis", screaming:"Menjerit", burping:"Bersendawa",
+    humming:"Bergumam", sigh:"Menghela napas", sniff:"Menghirup", sneeze:"Bersin" } },
+};
+
+const EXAMPLES = {
+  tts: ["Hello! This model speaks over a hundred languages.", "Bonjour, comment allez-vous aujourd'hui?"],
+  expr: ["<|emotion:sadness|>Aku menyesal ini terjadi. <|prosody:long_pause|> Tapi kita pasti bisa melewatinya.",
+         "<|style:shouting|>Semangat! Garis finis sudah dekat!"],
+  pod: ["Speaker 0: Menurutmu AI lokal itu masa depan?\nSpeaker 1: Jelas, privasinya jauh lebih terjaga."],
+  book: ["Speaker 0: Malam turun perlahan di desa itu.\nSpeaker 1: Siapa di sana?\nSpeaker 0: bisiknya pelan."],
+};
+
+// ---- helpers ----
+async function postJSON(path, body, wantBlob) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(TOKEN ? { "x-auth-token": TOKEN } : {}) },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let msg = "Gagal (HTTP " + res.status + ").";
+    let needLogin = false;
+    try { const j = await res.json(); if (j.error) msg = j.error + (j.detail ? " — " + j.detail : ""); needLogin = Boolean(j.needLogin); } catch {}
+    if (needLogin) { $("login").classList.add("show"); }  // hanya login web, bukan API key Boson
+    throw new Error(msg);
+  }
+  return wantBlob ? res.blob() : res.json();
+}
+function setStatus(el, msg, kind) { el.textContent = msg; el.className = "status" + (kind ? " " + kind : ""); }
+function fmt() { return $("fmt").value; }
+function audioBlockFromBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const div = document.createElement("div");
+  div.innerHTML = `<audio controls src="${url}"></audio><br><a class="dl" href="${url}" download="${name}">Unduh ${name}</a>`;
+  return div;
+}
+function b64ToBlob(b64, mime) {
+  const bin = atob(b64); const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+
+// ---- voice selects ----
+function voiceOptions() {
+  let html = "";
+  VOICES.bosonPresets.forEach((v) => (html += `<option value="boson:${v}">${v === "default" ? "Default" : v} (Boson)</option>`));
+  if (VOICES.presets.length) {
+    html += `<option disabled>── preset bawaan (kloning) ──</option>`;
+    VOICES.presets.forEach((p) => (html += `<option value="preset:${p.name}">${p.name}${p.hasText ? "" : " (tanpa transkrip)"}</option>`));
+  }
+  return html;
+}
+// value "boson:default" -> {voice:'default'} ; "preset:Name" -> {preset:'Name'}
+function resolveVoice(val) {
+  if (!val) return {};
+  if (val.startsWith("boson:")) return { voice: val.slice(6) };
+  if (val.startsWith("preset:")) return { preset: val.slice(7) };
+  return {};
+}
+
+// ---- init ----
+async function init() {
+  const cfg = await fetch("/api/config").then((r) => r.json()).catch(() => ({}));
+  if (cfg.keyConfigured === false) $("cfgHint").textContent = "⚠️ Server belum punya API key (isi .env).";
+  if (cfg.authRequired && !TOKEN) $("login").classList.add("show");
+
+  VOICES = await fetch("/api/voices").then((r) => r.json()).catch(() => VOICES);
+  const opts = voiceOptions();
+  ["tts-voice", "expr-voice", "batch-voice"].forEach((id) => ($(id).innerHTML = opts));
+  $("clone-preset").innerHTML = `<option value="">— (pakai audio unggahan) —</option>` + VOICES.presets.map((p) => `<option value="${p.name}">${p.name}</option>`).join("");
+
+  buildTagPalette();
+  buildSpeakers("pod-speakers", 2);
+  buildSpeakers("book-speakers", 2);
+}
+
+// ---- tabs ----
+document.querySelectorAll(".tab").forEach((t) =>
+  t.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((x) => x.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach((x) => x.classList.remove("active"));
+    t.classList.add("active");
+    $("p-" + t.dataset.tab).classList.add("active");
+  })
+);
+document.querySelectorAll("[data-ex]").forEach((b) =>
+  b.addEventListener("click", () => {
+    const key = b.dataset.ex, arr = EXAMPLES[key];
+    const ta = { tts: "tts-text", expr: "expr-text", pod: "pod-script", book: "book-script" }[key];
+    $(ta).value = arr[Math.floor(Math.random() * arr.length)];
+  })
+);
+
+// ---- login ----
+async function doLogin() {
+  const username = $("loginUser").value.trim();
+  const password = $("loginPass").value;
+  setStatus($("loginErr"), "Mengecek…");
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const j = await res.json();
+    if (!res.ok || !j.ok) throw new Error(j.error || "Login gagal.");
+    TOKEN = j.token || "";
+    localStorage.setItem("vpm_token", TOKEN);
+    $("login").classList.remove("show");
+    setStatus($("loginErr"), "");
+  } catch (e) { setStatus($("loginErr"), e.message, "err"); }
+}
+$("loginBtn").addEventListener("click", doLogin);
+$("loginPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+
+// ---- tag palette ----
+function buildTagPalette() {
+  const host = $("tag-palette"); host.innerHTML = "";
+  for (const cat of ["emotion", "prosody", "style", "sfx"]) {
+    const g = TAGS[cat];
+    const wrap = document.createElement("div"); wrap.className = "taggrp";
+    wrap.innerHTML = `<h4>${g.label}</h4>`;
+    const row = document.createElement("div"); row.className = "tagrow";
+    for (const [val, desc] of Object.entries(g.items)) {
+      const chip = document.createElement("button");
+      chip.className = "chip"; chip.textContent = val; chip.title = desc;
+      chip.addEventListener("click", () => insertTag(`<|${cat}:${val}|>`));
+      row.appendChild(chip);
+    }
+    wrap.appendChild(row); host.appendChild(wrap);
+  }
+}
+function insertTag(tag) {
+  const ta = $("expr-text"); const s = ta.selectionStart ?? ta.value.length;
+  ta.value = ta.value.slice(0, s) + tag + ta.value.slice(ta.selectionEnd ?? s);
+  ta.focus(); ta.selectionStart = ta.selectionEnd = s + tag.length;
+}
+
+// ---- speaker blocks (podcast / book) ----
+function buildSpeakers(hostId, n) {
+  const host = $(hostId); host.innerHTML = "";
+  const sel = document.createElement("div"); sel.className = "row";
+  sel.innerHTML = `<label class="field" style="margin:0">Jumlah pembicara</label>`;
+  const num = document.createElement("select");
+  [2, 3, 4].forEach((k) => (num.innerHTML += `<option value="${k}" ${k === n ? "selected" : ""}>${k}</option>`));
+  num.addEventListener("change", () => buildSpeakers(hostId, parseInt(num.value)));
+  sel.appendChild(num); host.appendChild(sel);
+  for (let i = 0; i < n; i++) {
+    const b = document.createElement("div"); b.className = "spk";
+    b.innerHTML = `<h4>Speaker ${i}</h4><select data-spk="${i}">${voiceOptions()}</select>`;
+    host.appendChild(b);
+  }
+}
+function collectSpeakers(hostId) {
+  const out = [];
+  $(hostId).querySelectorAll("select[data-spk]").forEach((s) => (out[parseInt(s.dataset.spk)] = resolveVoice(s.value)));
+  return out;
+}
+
+// ---- TTS ----
+$("tts-go").addEventListener("click", async () => {
+  const text = $("tts-text").value.trim();
+  if (!text) return setStatus($("tts-status"), "Isi teksnya dulu.", "err");
+  $("tts-go").disabled = true; setStatus($("tts-status"), "Menghasilkan…");
+  try {
+    const body = { input: text, response_format: fmt(), ...resolveVoice($("tts-voice").value) };
+    const blob = await postJSON("/api/speech", body, true);
+    const out = $("tts-out"); out.innerHTML = `<label class="field">Hasil</label>`;
+    out.appendChild(audioBlockFromBlob(blob, "tts." + fmt()));
+    setStatus($("tts-status"), "Selesai.", "ok");
+  } catch (e) { setStatus($("tts-status"), e.message, "err"); }
+  finally { $("tts-go").disabled = false; }
+});
+
+// ---- Ekspresi ----
+$("expr-go").addEventListener("click", async () => {
+  const text = $("expr-text").value.trim();
+  if (!text) return setStatus($("expr-status"), "Isi teksnya dulu.", "err");
+  $("expr-go").disabled = true; setStatus($("expr-status"), "Menghasilkan…");
+  try {
+    const body = { input: text, response_format: fmt(), ...resolveVoice($("expr-voice").value) };
+    const blob = await postJSON("/api/speech", body, true);
+    $("expr-out").innerHTML = ""; $("expr-out").appendChild(audioBlockFromBlob(blob, "ekspresi." + fmt()));
+    setStatus($("expr-status"), "Selesai.", "ok");
+  } catch (e) { setStatus($("expr-status"), e.message, "err"); }
+  finally { $("expr-go").disabled = false; }
+});
+
+// ---- Kloning ----
+function readFileAsDataURL(file) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
+}
+$("clone-go").addEventListener("click", async () => {
+  const text = $("clone-text").value.trim();
+  if (!text) return setStatus($("clone-status"), "Isi teksnya dulu.", "err");
+  const file = $("clone-file").files[0];
+  const preset = $("clone-preset").value;
+  if (!file && !preset) return setStatus($("clone-status"), "Unggah audio referensi atau pilih preset.", "err");
+  $("clone-go").disabled = true; setStatus($("clone-status"), "Mengunggah & kloning…");
+  try {
+    const body = { input: text, response_format: fmt(), ref_text: $("clone-reftext").value.trim() };
+    if (file) body.ref_audio = await readFileAsDataURL(file);
+    else body.preset = preset;
+    const blob = await postJSON("/api/speech", body, true);
+    const out = $("clone-out"); out.innerHTML = `<label class="field">Hasil</label>`;
+    out.appendChild(audioBlockFromBlob(blob, "kloning." + fmt()));
+    setStatus($("clone-status"), "Selesai.", "ok");
+  } catch (e) { setStatus($("clone-status"), e.message, "err"); }
+  finally { $("clone-go").disabled = false; }
+});
+
+// ---- Multi (podcast + book) ----
+async function runMulti(scriptId, hostId, statusId, outId, btn, prefix) {
+  const script = $(scriptId).value.trim();
+  if (!script) return setStatus($(statusId), "Skrip masih kosong.", "err");
+  btn.disabled = true; setStatus($(statusId), "Menghasilkan tiap giliran bicara…");
+  try {
+    const body = { script, speakers: collectSpeakers(hostId), response_format: fmt() };
+    const data = await postJSON("/api/multi", body, false);
+    const out = $(outId); out.innerHTML = `<label class="field">Hasil per giliran</label>`;
+    const blobs = [];
+    data.segments.forEach((seg) => {
+      const blob = b64ToBlob(seg.audio, seg.mime); blobs.push(blob);
+      const url = URL.createObjectURL(blob);
+      const d = document.createElement("div"); d.className = "seg";
+      d.innerHTML = `<div class="who">Speaker ${seg.speaker}</div><div class="txt">${seg.text.replace(/</g,"&lt;")}</div><audio controls src="${url}"></audio>`;
+      out.appendChild(d);
+    });
+    const merged = new Blob(blobs, { type: blobs[0]?.type || "audio/mpeg" });
+    const mUrl = URL.createObjectURL(merged);
+    const foot = document.createElement("div"); foot.style.marginTop = "12px";
+    foot.innerHTML = `<a class="dl" href="${mUrl}" download="${prefix}-gabungan.${fmt()}">⬇ Unduh gabungan (${prefix}.${fmt()})</a>`;
+    out.appendChild(foot);
+    setStatus($(statusId), "Selesai — " + data.segments.length + " giliran.", "ok");
+  } catch (e) { setStatus($(statusId), e.message, "err"); }
+  finally { btn.disabled = false; }
+}
+$("pod-go").addEventListener("click", () => runMulti("pod-script", "pod-speakers", "pod-status", "pod-out", $("pod-go"), "podcast"));
+$("book-go").addEventListener("click", () => runMulti("book-script", "book-speakers", "book-status", "book-out", $("book-go"), "buku-audio"));
+
+// ---- Batch ----
+$("batch-go").addEventListener("click", async () => {
+  const lines = $("batch-text").value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (!lines.length) return setStatus($("batch-status"), "Belum ada baris teks.", "err");
+  $("batch-go").disabled = true;
+  const out = $("batch-out"); out.innerHTML = `<label class="field">Hasil (${lines.length})</label>`;
+  const v = resolveVoice($("batch-voice").value);
+  for (let i = 0; i < lines.length; i++) {
+    setStatus($("batch-status"), `Memproses ${i + 1}/${lines.length}…`);
+    try {
+      const blob = await postJSON("/api/speech", { input: lines[i], response_format: fmt(), ...v }, true);
+      const d = document.createElement("div"); d.className = "seg";
+      d.innerHTML = `<div class="txt">${(i + 1) + ". " + lines[i].slice(0, 80).replace(/</g,"&lt;")}</div>`;
+      d.appendChild(audioBlockFromBlob(blob, `batch-${i + 1}.${fmt()}`));
+      out.appendChild(d);
+    } catch (e) {
+      const d = document.createElement("div"); d.className = "seg";
+      d.innerHTML = `<div class="txt" style="color:var(--danger)">${i + 1}. Gagal: ${e.message}</div>`;
+      out.appendChild(d);
+    }
+  }
+  setStatus($("batch-status"), "Selesai.", "ok");
+  $("batch-go").disabled = false;
+});
+
+init();
+</script>
+</body>
+</html>
