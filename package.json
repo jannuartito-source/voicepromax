@@ -1,0 +1,13 @@
+{
+  "name": "higgs-tts-cf",
+  "version": "1.0.0",
+  "description": "Higgs Audio v3 TTS di Cloudflare Workers. API key aman sebagai secret.",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
