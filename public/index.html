@@ -182,10 +182,15 @@
           <textarea id="clone-text" rows="3" placeholder="Teks dengan suara hasil kloning...">Ini suara hasil kloning dari audio referensi.</textarea>
           <div class="row">
             <div class="grow">
-              <label class="field">Audio referensi (unggah, ≤30 detik)</label>
+              <label class="field">Audio referensi (unggah atau rekam, ≤30 detik)</label>
               <input type="file" id="clone-file" accept="audio/*" />
             </div>
           </div>
+          <div class="row" style="margin-top:8px">
+            <button class="ghost" id="rec-btn" type="button">🎙️ Mulai rekam</button>
+            <span class="hint" id="rec-status" style="margin:0"></span>
+          </div>
+          <audio id="rec-preview" controls style="display:none;margin-top:8px"></audio>
           <div class="row grow">
             <div class="grow">
               <label class="field">Atau pilih preset bawaan</label>
@@ -459,16 +464,74 @@ $("expr-go").addEventListener("click", async () => {
 function readFileAsDataURL(file) {
   return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
 }
+function blobToDataURL(blob) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
+}
+
+// --- Rekam dari mikrofon ---
+let mediaRecorder = null, recChunks = [], recordedBlob = null, recTimer = null;
+$("rec-btn").addEventListener("click", async () => {
+  // Sedang merekam -> stop
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+    return;
+  }
+  // Mulai merekam
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return setStatus($("rec-status"), "Browser tidak mendukung perekaman. Pakai unggah file.", "err");
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
+    mediaRecorder.onstop = async () => {
+      clearInterval(recTimer);
+      stream.getTracks().forEach((t) => t.stop()); // matikan indikator mic
+      recordedBlob = new Blob(recChunks, { type: recChunks[0]?.type || "audio/webm" });
+      const url = URL.createObjectURL(recordedBlob);
+      const pv = $("rec-preview"); pv.src = url; pv.style.display = "block";
+      $("clone-file").value = ""; // rekaman menggantikan file unggahan
+      $("rec-btn").textContent = "🎙️ Rekam ulang";
+      setStatus($("rec-status"), "Rekaman siap dipakai.", "ok");
+    };
+    mediaRecorder.start();
+    // batasi otomatis 30 detik
+    let sec = 0;
+    setStatus($("rec-status"), "● Merekam… (klik lagi untuk berhenti)", "");
+    recTimer = setInterval(() => {
+      sec++;
+      $("rec-status").textContent = `● Merekam… ${sec}s (klik lagi untuk berhenti)`;
+      if (sec >= 30) mediaRecorder.stop();
+    }, 1000);
+    $("rec-btn").textContent = "⏹ Berhenti";
+  } catch (e) {
+    setStatus($("rec-status"), "Izin mikrofon ditolak atau gagal.", "err");
+  }
+});
+
+// Kalau user memilih file unggahan, batalkan rekaman agar tidak bentrok.
+$("clone-file").addEventListener("change", () => {
+  if ($("clone-file").files[0]) {
+    recordedBlob = null;
+    $("rec-preview").style.display = "none";
+    $("rec-btn").textContent = "🎙️ Mulai rekam";
+    setStatus($("rec-status"), "");
+  }
+});
+
 $("clone-go").addEventListener("click", async () => {
   const text = $("clone-text").value.trim();
   if (!text) return setStatus($("clone-status"), "Isi teksnya dulu.", "err");
   const file = $("clone-file").files[0];
   const preset = $("clone-preset").value;
-  if (!file && !preset) return setStatus($("clone-status"), "Unggah audio referensi atau pilih preset.", "err");
-  $("clone-go").disabled = true; setStatus($("clone-status"), "Mengunggah & kloning…");
+  if (!recordedBlob && !file && !preset)
+    return setStatus($("clone-status"), "Rekam suara, unggah audio, atau pilih preset.", "err");
+  $("clone-go").disabled = true; setStatus($("clone-status"), "Memproses & kloning…");
   try {
     const body = { input: text, response_format: fmt(), ref_text: $("clone-reftext").value.trim() };
-    if (file) body.ref_audio = await readFileAsDataURL(file);
+    if (recordedBlob) body.ref_audio = await blobToDataURL(recordedBlob); // rekaman diutamakan
+    else if (file) body.ref_audio = await readFileAsDataURL(file);
     else body.preset = preset;
     const blob = await postJSON("/api/speech", body, true);
     const out = $("clone-out"); out.innerHTML = `<label class="field">Hasil</label>`;
