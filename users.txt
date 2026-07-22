@@ -1,0 +1,12 @@
+# DAFTAR USER LOGIN — Voice Pro Max
+# =================================
+# Format: username:password   (satu user per baris)
+# - Baris yang diawali #  = komentar, diabaikan.
+# - Baris kosong          = diabaikan.
+# - Simpan file ini setelah mengubah -> langsung berlaku, TIDAK perlu restart server.
+# - Kalau SEMUA baris user dihapus/dikomentari -> web jadi TERBUKA (tanpa login).
+#
+# Contoh (hapus tanda # di depannya untuk mengaktifkan):
+admin:rahasia123
+# budi:passwordbudi
+# siti:12345
