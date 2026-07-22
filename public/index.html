@@ -468,6 +468,38 @@ function blobToDataURL(blob) {
   return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); });
 }
 
+// Ubah audio apa pun (webm/mp4/ogg hasil rekaman/unggahan) menjadi WAV mono 16-bit,
+// karena Boson hanya menerima format seperti WAV/MP3. Dilakukan di dalam browser.
+function encodeWav(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buf);
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); wr(8, "WAVE");
+  wr(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  wr(36, "data"); view.setUint32(40, samples.length * 2, true);
+  let o = 44;
+  for (let i = 0; i < samples.length; i++) {
+    let s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); o += 2;
+  }
+  return new Blob([view], { type: "audio/wav" });
+}
+async function toWavDataURL(src) {
+  const ab = await src.arrayBuffer();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  const audio = await ctx.decodeAudioData(ab);
+  if (ctx.close) ctx.close();
+  const len = audio.length, mono = new Float32Array(len);
+  for (let c = 0; c < audio.numberOfChannels; c++) {
+    const d = audio.getChannelData(c);
+    for (let i = 0; i < len; i++) mono[i] += d[i] / audio.numberOfChannels;
+  }
+  return blobToDataURL(encodeWav(mono, audio.sampleRate));
+}
+
 // --- Rekam dari mikrofon ---
 let mediaRecorder = null, recChunks = [], recordedBlob = null, recTimer = null;
 $("rec-btn").addEventListener("click", async () => {
@@ -530,9 +562,14 @@ $("clone-go").addEventListener("click", async () => {
   $("clone-go").disabled = true; setStatus($("clone-status"), "Memproses & kloning…");
   try {
     const body = { input: text, response_format: fmt(), ref_text: $("clone-reftext").value.trim() };
-    if (recordedBlob) body.ref_audio = await blobToDataURL(recordedBlob); // rekaman diutamakan
-    else if (file) body.ref_audio = await readFileAsDataURL(file);
-    else body.preset = preset;
+    // Rekaman/unggahan diubah ke WAV dulu agar diterima Boson.
+    if (recordedBlob) {
+      try { body.ref_audio = await toWavDataURL(recordedBlob); }
+      catch { body.ref_audio = await blobToDataURL(recordedBlob); }
+    } else if (file) {
+      try { body.ref_audio = await toWavDataURL(file); }
+      catch { body.ref_audio = await readFileAsDataURL(file); }
+    } else body.preset = preset;
     const blob = await postJSON("/api/speech", body, true);
     const out = $("clone-out"); out.innerHTML = `<label class="field">Hasil</label>`;
     out.appendChild(audioBlockFromBlob(blob, "kloning." + fmt()));
