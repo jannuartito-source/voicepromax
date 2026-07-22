@@ -8,5 +8,6 @@
 #
 # Contoh (hapus tanda # di depannya untuk mengaktifkan):
 admin:rahasia123
-# budi:passwordbudi
+# budi:rahasia123
 # siti:12345
+# wibi:123
