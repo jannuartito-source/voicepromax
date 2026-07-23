@@ -310,13 +310,10 @@ function b64ToBlob(b64, mime) {
 
 // ---- voice selects ----
 function voiceOptions() {
-  let html = "";
-  VOICES.bosonPresets.forEach((v) => (html += `<option value="boson:${v}">${v === "default" ? "Default" : v} (Boson)</option>`));
-  if (VOICES.presets.length) {
-    html += `<option disabled>── preset bawaan (kloning) ──</option>`;
-    VOICES.presets.forEach((p) => (html += `<option value="preset:${p.name}">${p.name}${p.hasText ? "" : " (tanpa transkrip)"}</option>`));
-  }
-  return html;
+  if (!VOICES.presets.length) return `<option value="">(belum ada preset suara)</option>`;
+  return VOICES.presets
+    .map((p) => `<option value="preset:${p.name}">${p.name}${p.hasText ? "" : " (tanpa transkrip)"}</option>`)
+    .join("");
 }
 // value "boson:default" -> {voice:'default'} ; "preset:Name" -> {preset:'Name'}
 function resolveVoice(val) {
