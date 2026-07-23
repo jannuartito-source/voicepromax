@@ -575,18 +575,32 @@ function encodeWav(samples, sampleRate) {
   }
   return new Blob([view], { type: "audio/wav" });
 }
-async function toWavDataURL(src) {
+// Ubah audio jadi WAV mono 16 kHz, dipotong maks 25 detik.
+// Ukuran jadi kecil (± < 1 MB) supaya tidak menembus batas Vercel (413).
+async function toWavDataURL(src, targetSR = 16000, maxSec = 25) {
   const ab = await src.arrayBuffer();
   const AC = window.AudioContext || window.webkitAudioContext;
-  const ctx = new AC();
-  const audio = await ctx.decodeAudioData(ab);
-  if (ctx.close) ctx.close();
-  const len = audio.length, mono = new Float32Array(len);
-  for (let c = 0; c < audio.numberOfChannels; c++) {
-    const d = audio.getChannelData(c);
-    for (let i = 0; i < len; i++) mono[i] += d[i] / audio.numberOfChannels;
+  const tmp = new AC();
+  const decoded = await tmp.decodeAudioData(ab);
+  if (tmp.close) tmp.close();
+
+  const srcLen = Math.min(decoded.length, Math.floor(decoded.sampleRate * maxSec));
+  // mixdown ke mono dulu
+  const monoIn = new Float32Array(srcLen);
+  for (let c = 0; c < decoded.numberOfChannels; c++) {
+    const d = decoded.getChannelData(c);
+    for (let i = 0; i < srcLen; i++) monoIn[i] += d[i] / decoded.numberOfChannels;
   }
-  return blobToDataURL(encodeWav(mono, audio.sampleRate));
+  // resample ke targetSR pakai OfflineAudioContext
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const outLen = Math.max(1, Math.ceil((srcLen / decoded.sampleRate) * targetSR));
+  const off = new OAC(1, outLen, targetSR);
+  const inBuf = off.createBuffer(1, srcLen, decoded.sampleRate);
+  inBuf.getChannelData(0).set(monoIn);
+  const node = off.createBufferSource();
+  node.buffer = inBuf; node.connect(off.destination); node.start();
+  const rendered = await off.startRendering();
+  return blobToDataURL(encodeWav(rendered.getChannelData(0), targetSR));
 }
 
 // --- Rekam dari mikrofon ---
