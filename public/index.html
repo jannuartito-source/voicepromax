@@ -112,17 +112,10 @@
   </div>
 
   <div class="wrap">
-    <!-- ================== HEADER / BRANDING ==================
-         Untuk mengganti ke brand/donasimu sendiri, ubah teks & link di bawah.
-         CATATAN: link Saweria & TikTok di bawah mengarah ke akun "Korobroo"
-         (pembuat asli), BUKAN akunmu. Ganti kalau ingin donasi masuk ke kamu. -->
+    <!-- ================== HEADER / BRANDING ================== -->
     <div class="brand">
       <h1>🎙️ Voice Pro Max</h1>
       <p class="subtitle">Voice Pro Max · 100+ bahasa · kloning suara · sutradara teks AI · podcast &amp; buku audio</p>
-      <p class="credits">Dibuat oleh <a href="https://www.tiktok.com/@korobroo" target="_blank" rel="noopener">Korobroo</a>
-        — Licensed by Korobroo 2026. Dukung lewat
-        <a href="https://saweria.co/korobroo" target="_blank" rel="noopener">Saweria</a> · Follow
-        <a href="https://www.tiktok.com/@korobroo" target="_blank" rel="noopener">TikTok</a>.</p>
     </div>
     <!-- ======================================================= -->
 
@@ -432,16 +425,115 @@ function collectSpeakers(hostId) {
 }
 
 // ---- TTS ----
+// ================== GENERASI CEPAT (chunk + paralel) ==================
+// Teks panjang dipecah jadi potongan kecil, digenerate BERBARENGAN, lalu digabung
+// berurutan. Ini yang membuat audio panjang selesai jauh lebih cepat.
+const CHUNK_MAX = 480;   // ± karakter per potongan
+const CONCURRENCY = 4;   // berapa potongan digarap sekaligus (jaga2 rate limit Boson)
+
+function splitIntoChunks(text, maxLen = CHUNK_MAX) {
+  const paras = text.split(/\n+/).map((p) => p.trim()).filter(Boolean);
+  const chunks = []; let cur = "";
+  const push = () => { if (cur.trim()) chunks.push(cur.trim()); cur = ""; };
+  for (const para of paras) {
+    const sentences = para.match(/[^.!?]+[.!?]*\s*/g) || [para];
+    for (const s of sentences) {
+      if (cur && (cur + s).length > maxLen) push();
+      cur += s;
+      if (cur.length >= maxLen) push();
+    }
+    push(); // batas paragraf
+  }
+  push();
+  return chunks.length ? chunks : [text];
+}
+
+// jalankan pekerjaan paralel dengan batas concurrency, hasil tetap urut
+async function runPool(items, worker, concurrency, onProgress) {
+  const results = new Array(items.length);
+  let idx = 0, done = 0;
+  async function next() {
+    const i = idx++;
+    if (i >= items.length) return;
+    results[i] = await worker(items[i], i);
+    onProgress && onProgress(++done, items.length);
+    return next();
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, next));
+  return results;
+}
+
+// satu potongan -> audio (dengan retry kalau kena rate limit/gagal sesaat)
+async function speechChunk(input, voiceBody, tries = 3) {
+  for (let a = 1; a <= tries; a++) {
+    try { return await postJSON("/api/speech", { input, ...voiceBody }, true); }
+    catch (e) {
+      if (a === tries) throw e;
+      await new Promise((r) => setTimeout(r, 800 * a)); // tunggu lalu coba lagi
+    }
+  }
+}
+
+// gabung beberapa WAV jadi satu (byte-level, hemat memori) — untuk teks panjang
+async function concatWav(blobs) {
+  let sampleRate = 44100, channels = 1, bits = 16, total = 0;
+  const datas = [];
+  for (const b of blobs) {
+    const dv = new DataView(await b.arrayBuffer());
+    let off = 12, dOff = null, dLen = 0;
+    while (off + 8 <= dv.byteLength) {
+      const id = String.fromCharCode(dv.getUint8(off), dv.getUint8(off + 1), dv.getUint8(off + 2), dv.getUint8(off + 3));
+      const sz = dv.getUint32(off + 4, true);
+      if (id === "fmt ") { channels = dv.getUint16(off + 10, true); sampleRate = dv.getUint32(off + 12, true); bits = dv.getUint16(off + 22, true); }
+      if (id === "data") { dOff = off + 8; dLen = sz; }
+      off += 8 + sz + (sz % 2);
+    }
+    if (dOff != null) { datas.push(new Uint8Array(dv.buffer.slice(dOff, dOff + dLen))); total += dLen; }
+  }
+  const h = new DataView(new ArrayBuffer(44));
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) h.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, "RIFF"); h.setUint32(4, 36 + total, true); wr(8, "WAVE");
+  wr(12, "fmt "); h.setUint32(16, 16, true); h.setUint16(20, 1, true); h.setUint16(22, channels, true);
+  h.setUint32(24, sampleRate, true); h.setUint32(28, sampleRate * channels * bits / 8, true);
+  h.setUint16(32, channels * bits / 8, true); h.setUint16(34, bits, true);
+  wr(36, "data"); h.setUint32(40, total, true);
+  return new Blob([h, ...datas], { type: "audio/wav" });
+}
+async function mergeAudio(blobs, format) {
+  if (blobs.length === 1) return blobs[0];
+  return format === "wav" ? concatWav(blobs) : new Blob(blobs, { type: "audio/mpeg" });
+}
+
+function statsCard(chunks, secs, chars) {
+  const s = (secs).toFixed(1);
+  return `<div class="row" style="gap:16px;margin:2px 0 12px;font-size:12.5px;color:var(--muted)">
+    <span>📦 <b style="color:var(--text)">${chunks}</b> chunk</span>
+    <span>⏱ <b style="color:var(--text)">${s}s</b> waktu render</span>
+    <span>🔤 <b style="color:var(--text)">${chars}</b> karakter</span></div>`;
+}
+// =====================================================================
+
 $("tts-go").addEventListener("click", async () => {
   const text = $("tts-text").value.trim();
   if (!text) return setStatus($("tts-status"), "Isi teksnya dulu.", "err");
-  $("tts-go").disabled = true; setStatus($("tts-status"), "Menghasilkan…");
+  const voiceBody = { response_format: fmt(), ...resolveVoice($("tts-voice").value) };
+  const chunks = splitIntoChunks(text);
+  $("tts-go").disabled = true;
+  const t0 = performance.now();
+  setStatus($("tts-status"), `Menghasilkan… 0/${chunks.length} bagian`);
   try {
-    const body = { input: text, response_format: fmt(), ...resolveVoice($("tts-voice").value) };
-    const blob = await postJSON("/api/speech", body, true);
-    const out = $("tts-out"); out.innerHTML = `<label class="field">Hasil</label>`;
-    out.appendChild(audioBlockFromBlob(blob, "tts." + fmt()));
-    setStatus($("tts-status"), "Selesai.", "ok");
+    const blobs = await runPool(
+      chunks,
+      (c) => speechChunk(c, voiceBody),
+      CONCURRENCY,
+      (done, tot) => setStatus($("tts-status"), `Menghasilkan… ${done}/${tot} bagian`)
+    );
+    const merged = await mergeAudio(blobs, fmt());
+    const secs = (performance.now() - t0) / 1000;
+    const out = $("tts-out");
+    out.innerHTML = `<label class="field">Hasil</label>` + statsCard(chunks.length, secs, text.length);
+    out.appendChild(audioBlockFromBlob(merged, "voicepromax-tts." + fmt()));
+    setStatus($("tts-status"), `Selesai — ${chunks.length} bagian dalam ${secs.toFixed(1)} detik.`, "ok");
   } catch (e) { setStatus($("tts-status"), e.message, "err"); }
   finally { $("tts-go").disabled = false; }
 });
@@ -454,7 +546,7 @@ $("expr-go").addEventListener("click", async () => {
   try {
     const body = { input: text, response_format: fmt(), ...resolveVoice($("expr-voice").value) };
     const blob = await postJSON("/api/speech", body, true);
-    $("expr-out").innerHTML = ""; $("expr-out").appendChild(audioBlockFromBlob(blob, "ekspresi." + fmt()));
+    $("expr-out").innerHTML = ""; $("expr-out").appendChild(audioBlockFromBlob(blob, "voicepromax-ekspresi." + fmt()));
     setStatus($("expr-status"), "Selesai.", "ok");
   } catch (e) { setStatus($("expr-status"), e.message, "err"); }
   finally { $("expr-go").disabled = false; }
@@ -572,7 +664,7 @@ $("clone-go").addEventListener("click", async () => {
     } else body.preset = preset;
     const blob = await postJSON("/api/speech", body, true);
     const out = $("clone-out"); out.innerHTML = `<label class="field">Hasil</label>`;
-    out.appendChild(audioBlockFromBlob(blob, "kloning." + fmt()));
+    out.appendChild(audioBlockFromBlob(blob, "voicepromax-kloning." + fmt()));
     setStatus($("clone-status"), "Selesai.", "ok");
   } catch (e) { setStatus($("clone-status"), e.message, "err"); }
   finally { $("clone-go").disabled = false; }
@@ -622,7 +714,7 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix) {
     const merged = new Blob(blobs, { type: blobs[0].type || "audio/mpeg" });
     const mUrl = URL.createObjectURL(merged);
     const foot = document.createElement("div"); foot.style.marginTop = "12px";
-    foot.innerHTML = `<a class="dl" href="${mUrl}" download="${prefix}-gabungan.${fmt()}">⬇ Unduh gabungan (${prefix}.${fmt()})</a>`;
+    foot.innerHTML = `<a class="dl" href="${mUrl}" download="voicepromax-${prefix}-gabungan.${fmt()}">⬇ Unduh gabungan (${prefix}.${fmt()})</a>`;
     out.appendChild(foot);
   }
   setStatus($(statusId), "Selesai — " + turns.length + " giliran.", "ok");
@@ -644,7 +736,7 @@ $("batch-go").addEventListener("click", async () => {
       const blob = await postJSON("/api/speech", { input: lines[i], response_format: fmt(), ...v }, true);
       const d = document.createElement("div"); d.className = "seg";
       d.innerHTML = `<div class="txt">${(i + 1) + ". " + lines[i].slice(0, 80).replace(/</g,"&lt;")}</div>`;
-      d.appendChild(audioBlockFromBlob(blob, `batch-${i + 1}.${fmt()}`));
+      d.appendChild(audioBlockFromBlob(blob, `voicepromax-batch-${i + 1}.${fmt()}`));
       out.appendChild(d);
     } catch (e) {
       const d = document.createElement("div"); d.className = "seg";
