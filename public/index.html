@@ -662,21 +662,35 @@ $("clone-go").addEventListener("click", async () => {
   const preset = $("clone-preset").value;
   if (!recordedBlob && !file && !preset)
     return setStatus($("clone-status"), "Rekam suara, unggah audio, atau pilih preset.", "err");
-  $("clone-go").disabled = true; setStatus($("clone-status"), "Memproses & kloning…");
+  $("clone-go").disabled = true;
+  const t0 = performance.now();
+  setStatus($("clone-status"), "Menyiapkan audio referensi…");
   try {
-    const body = { input: text, response_format: fmt(), ref_text: $("clone-reftext").value.trim() };
-    // Rekaman/unggahan diubah ke WAV dulu agar diterima Boson.
+    // Siapkan "suara" SEKALI, lalu dipakai ulang untuk semua potongan.
+    const voiceBody = { response_format: fmt(), ref_text: $("clone-reftext").value.trim() };
     if (recordedBlob) {
-      try { body.ref_audio = await toWavDataURL(recordedBlob); }
-      catch { body.ref_audio = await blobToDataURL(recordedBlob); }
+      try { voiceBody.ref_audio = await toWavDataURL(recordedBlob); }
+      catch { voiceBody.ref_audio = await blobToDataURL(recordedBlob); }
     } else if (file) {
-      try { body.ref_audio = await toWavDataURL(file); }
-      catch { body.ref_audio = await readFileAsDataURL(file); }
-    } else body.preset = preset;
-    const blob = await postJSON("/api/speech", body, true);
-    const out = $("clone-out"); out.innerHTML = `<label class="field">Hasil</label>`;
-    out.appendChild(audioBlockFromBlob(blob, "voicepromax-kloning." + fmt()));
-    setStatus($("clone-status"), "Selesai.", "ok");
+      try { voiceBody.ref_audio = await toWavDataURL(file); }
+      catch { voiceBody.ref_audio = await readFileAsDataURL(file); }
+    } else { voiceBody.preset = preset; }
+
+    // Pecah teks -> generate paralel (maks 2 sekaligus, jaga2 batas ukuran) -> gabung.
+    const chunks = splitIntoChunks(text);
+    setStatus($("clone-status"), `Menghasilkan… 0/${chunks.length} bagian`);
+    const blobs = await runPool(
+      chunks,
+      (c) => speechChunk(c, voiceBody),
+      2,
+      (done, tot) => setStatus($("clone-status"), `Menghasilkan… ${done}/${tot} bagian`)
+    );
+    const merged = await mergeAudio(blobs, fmt());
+    const secs = (performance.now() - t0) / 1000;
+    const out = $("clone-out");
+    out.innerHTML = `<label class="field">Hasil</label>` + statsCard(chunks.length, secs, text.length);
+    out.appendChild(audioBlockFromBlob(merged, "voicepromax-kloning." + fmt()));
+    setStatus($("clone-status"), `Selesai — ${chunks.length} bagian dalam ${secs.toFixed(1)} detik.`, "ok");
   } catch (e) { setStatus($("clone-status"), e.message, "err"); }
   finally { $("clone-go").disabled = false; }
 });
