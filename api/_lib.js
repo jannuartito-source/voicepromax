@@ -17,6 +17,58 @@ const USERS_FILE = path.join(ROOT, "users.txt");
 export const AUDIO_EXT = { ".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac", ".ogg": "audio/ogg", ".m4a": "audio/mp4" };
 export const BOSON_PRESETS = ["default", "jake"];
 
+// ---------- penyimpanan status "bebas iklan" (Vercel KV / Upstash Redis) ----------
+// Mendukung penamaan env dari Vercel KV maupun Upstash.
+const KV_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "";
+const KV_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "";
+export const kvReady = Boolean(KV_URL && KV_TOKEN);
+
+async function kv(parts) {
+  const path_ = parts.map(encodeURIComponent).join("/");
+  const r = await fetch(`${KV_URL}/${path_}`, { headers: { Authorization: `Bearer ${KV_TOKEN}` } });
+  if (!r.ok) throw new Error("KV error " + r.status);
+  return (await r.json()).result;
+}
+const adKey = (u) => `adfree:${String(u || "").trim().toLowerCase()}`;
+
+// Tandai username bebas iklan selama N hari (pakai TTL Redis -> otomatis hangus).
+export async function setAdFree(username, days = 30) {
+  if (!kvReady) throw new Error("KV belum dikonfigurasi (KV_REST_API_URL / KV_REST_API_TOKEN).");
+  return kv(["setex", adKey(username), String(Math.round(days * 86400)), "1"]);
+}
+// Cek apakah username masih bebas iklan.
+export async function isAdFree(username) {
+  if (!kvReady || !username) return false;
+  try { return (await kv(["get", adKey(username)])) === "1"; } catch { return false; }
+}
+
+// ---------- masa percobaan bebas iklan (grace) untuk user baru ----------
+// Jam mulai dihitung sejak LOGIN PERTAMA (otomatis, tanpa catat tanggal manual).
+const GRACE_DAYS = Number(process.env.GRACE_DAYS || 14);
+const joinKey = (u) => `joined:${String(u || "").trim().toLowerCase()}`;
+
+// Set waktu bergabung kalau belum ada (dipakai HANYA saat login terverifikasi).
+export async function ensureJoined(username) {
+  if (!kvReady || !username) return 0;
+  try {
+    const j = await kv(["get", joinKey(username)]);
+    if (j) return Number(j);
+    const now = Date.now();
+    await kv(["set", joinKey(username), String(now)]);
+    return now;
+  } catch { return 0; }
+}
+// Baca saja (tanpa membuat) — dipakai endpoint status publik.
+export async function getJoined(username) {
+  if (!kvReady || !username) return 0;
+  try { const j = await kv(["get", joinKey(username)]); return j ? Number(j) : 0; } catch { return 0; }
+}
+export function graceInfo(joinedTs) {
+  if (!joinedTs) return { grace: false, daysLeft: 0 };
+  const left = GRACE_DAYS * 86400000 - (Date.now() - joinedTs);
+  return { grace: left > 0, daysLeft: Math.max(0, Math.ceil(left / 86400000)) };
+}
+
 // ---------- user & login (stateless, cocok untuk serverless) ----------
 export function readUsers() {
   const users = new Map();

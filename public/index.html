@@ -111,6 +111,51 @@
     </div>
   </div>
 
+  <!-- Modal penawaran Hapus Iklan -->
+  <div class="login" id="offer">
+    <div class="box" style="width:360px;text-align:center;position:relative">
+      <button id="offer-x" style="position:absolute;top:12px;right:14px;background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer">×</button>
+      <div style="font-size:34px;margin:4px 0 6px">🛡️</div>
+      <h3 style="margin:0 0 4px">Nikmati tanpa iklan</h3>
+      <p class="hint" style="margin:0 0 14px">Halo <b id="offer-user" style="color:var(--text)"></b>, hilangkan iklan supaya lebih nyaman.</p>
+      <div style="text-align:left;font-size:14px;line-height:2;margin-bottom:16px">
+        <div>✅ Tanpa iklan saat Generate / Unduh</div>
+        <div>✅ Proses tanpa gangguan</div>
+        <div>✅ Aktif otomatis setelah pembayaran</div>
+      </div>
+      <button class="go" id="offer-buy-week" style="width:100%;background:linear-gradient(135deg,#0ea5e9,#38bdf8);color:#04121f">Hapus Iklan Mingguan — <span id="price-week">Rp9.900</span></button>
+      <button class="go" id="offer-buy-month" style="width:100%;margin-top:8px;background:linear-gradient(135deg,#f97316,#fb923c);color:#fff">Hapus Iklan Bulanan — <span id="price-month">Rp24.500</span></button>
+      <button class="ghost" id="offer-paid" style="width:100%;margin-top:10px;border:none">Saya sudah bayar — segarkan status</button>
+      <p class="hint" style="margin:10px 0 0;font-size:11px">Mingguan berlaku 7 hari, bulanan 30 hari. Setelah bayar, status aktif otomatis (atau tekan "Saya sudah bayar"). Login pakai username yang sama.</p>
+      <div class="status" id="offer-status" style="text-align:center"></div>
+    </div>
+  </div>
+
+  <!-- Modal anti-adblocker -->
+  <div class="login" id="adblock-modal">
+    <div class="box" style="width:360px;text-align:center">
+      <div style="font-size:34px;margin:4px 0 6px">🚫</div>
+      <h3 style="margin:0 0 6px">Adblocker terdeteksi</h3>
+      <p class="hint" style="margin:0 0 14px">Layanan ini gratis berkat iklan. Nonaktifkan adblocker untuk lanjut, atau pilih Hapus Iklan agar tidak ada iklan sama sekali.</p>
+      <button class="go" id="adblock-retry" style="width:100%">Saya sudah nonaktifkan — coba lagi</button>
+      <button class="ghost" id="adblock-buy" style="width:100%;margin-top:8px;border-color:var(--sky);color:var(--sky-2)">✨ Hapus Iklan</button>
+      <div class="status" id="adblock-status" style="text-align:center"></div>
+    </div>
+  </div>
+
+  <!-- Modal iklan (tampil tiap generate ke-2 untuk yang belum bayar) -->
+  <div class="login" id="ad-modal">
+    <div class="box" style="width:360px;text-align:center">
+      <p class="hint" style="margin:0 0 10px">Iklan — dukung layanan ini</p>
+      <div id="ad-slot" style="min-height:250px;display:flex;align-items:center;justify-content:center;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;overflow:hidden">
+        <iframe id="ad-frame" style="border:0;width:300px;height:250px;display:none"></iframe>
+        <span id="ad-placeholder" class="hint">Slot iklan (Adsterra)</span>
+      </div>
+      <button class="go" id="ad-close" style="width:100%;margin-top:12px">Tutup</button>
+      <button class="ghost" id="ad-remove" style="width:100%;margin-top:8px;border:none;color:var(--sky-2)">✨ Hapus iklan selamanya</button>
+    </div>
+  </div>
+
   <div class="wrap">
     <!-- ================== HEADER / BRANDING ================== -->
     <div class="brand">
@@ -123,6 +168,9 @@
       <label>Format keluaran</label>
       <select id="fmt"><option value="mp3">mp3</option><option value="wav">wav</option></select>
       <span class="hint" id="cfgHint"></span>
+      <span style="flex:1"></span>
+      <button class="ghost" id="removeAdsBtn" style="display:none;border-color:var(--sky);color:var(--sky-2)">✨ Hapus Iklan</button>
+      <span id="adFreeBadge" class="hint" style="display:none;color:var(--ok)">✓ Bebas iklan aktif</span>
     </div>
 
     <div class="tabs">
@@ -249,6 +297,12 @@ Dan ini baris ketiga.</textarea>
 <script>
 const $ = (id) => document.getElementById(id);
 let TOKEN = localStorage.getItem("vpm_token") || "";
+let USERNAME = localStorage.getItem("vpm_user") || "";
+let AD_FREE = false;
+let PAID = false;
+let BUY_URL_WEEK = "", BUY_URL_MONTH = "";
+let PRICE_WEEK = "Rp9.900", PRICE_MONTH = "Rp24.500";
+let genCount = 0;
 let VOICES = { presets: [], bosonPresets: ["default"] };
 
 // ---- tag data (dari Higgs Audio v3) ----
@@ -328,6 +382,12 @@ async function init() {
   const cfg = await fetch("/api/config").then((r) => r.json()).catch(() => ({}));
   if (cfg.keyConfigured === false) $("cfgHint").textContent = "⚠️ Server belum punya API key (isi .env).";
   if (cfg.authRequired && !TOKEN) $("login").classList.add("show");
+  BUY_URL_WEEK = cfg.buyUrlWeek || "";
+  BUY_URL_MONTH = cfg.buyUrlMonth || "";
+  PRICE_WEEK = cfg.priceWeek || "Rp9.900";
+  PRICE_MONTH = cfg.priceMonth || "Rp24.500";
+  $("price-week").textContent = PRICE_WEEK;
+  $("price-month").textContent = PRICE_MONTH;
 
   VOICES = await fetch("/api/voices").then((r) => r.json()).catch(() => VOICES);
   const opts = voiceOptions();
@@ -337,6 +397,10 @@ async function init() {
   buildTagPalette();
   buildSpeakers("pod-speakers", 2);
   buildSpeakers("book-speakers", 2);
+
+  if (USERNAME) await refreshAdFree(); // segarkan status saat halaman dibuka
+  updateAdUI();
+  if (!AD_FREE && (await detectAdblock())) showAdblockWall(); // paksa nonaktifkan adblock
 }
 
 // ---- tabs ----
@@ -369,13 +433,154 @@ async function doLogin() {
     const j = await res.json();
     if (!res.ok || !j.ok) throw new Error(j.error || "Login gagal.");
     TOKEN = j.token || "";
+    USERNAME = username;
+    AD_FREE = Boolean(j.adFree);
+    PAID = Boolean(j.paid);
     localStorage.setItem("vpm_token", TOKEN);
+    localStorage.setItem("vpm_user", USERNAME);
     $("login").classList.remove("show");
     setStatus($("loginErr"), "");
+    updateAdUI();
   } catch (e) { setStatus($("loginErr"), e.message, "err"); }
 }
 $("loginBtn").addEventListener("click", doLogin);
 $("loginPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+
+// ================== SISTEM IKLAN & HAPUS IKLAN ==================
+// >>> TEMPEL KODE BANNER ADSTERRA KAMU DI DALAM TANDA BACKTICK DI BAWAH INI <<<
+// Ambil dari dashboard Adsterra: Websites -> Add code -> Banner 300x250.
+// Salin SELURUH kode <script>...</script> yang mereka beri, taruh di antara backtick.
+// Biarkan kosong kalau belum punya (nanti muncul kotak "Slot iklan" saja).
+const ADSTERRA_HTML = `<script type="text/javascript">
+  atOptions = {
+    'key' : '9f0b15835dee82ee831b130b0700a681',
+    'format' : 'iframe',
+    'height' : 250,
+    'width' : 300,
+    'params' : {}
+  };
+</script>
+<script src="https://www.highperformanceformat.com/9f0b15835dee82ee831b130b0700a681/invoke.js"></script>`;
+
+function updateAdUI() {
+  const loggedIn = Boolean(USERNAME);
+  // Tombol "Hapus Iklan" hanya muncul kalau iklan memang sedang aktif (bukan bebas iklan).
+  $("removeAdsBtn").style.display = (loggedIn && !AD_FREE) ? "inline-block" : "none";
+  // Badge hanya untuk yang BENAR-BENAR sudah membayar. Masa 2 minggu awal: tanpa label apa pun.
+  $("adFreeBadge").style.display = PAID ? "inline" : "none";
+}
+
+// Segarkan status bebas iklan dari server (dipakai saat "sudah bayar" / buka halaman).
+async function refreshAdFree() {
+  if (!USERNAME) return;
+  try {
+    const j = await fetch("/api/status?u=" + encodeURIComponent(USERNAME)).then((r) => r.json());
+    AD_FREE = Boolean(j.adFree);
+    PAID = Boolean(j.paid);
+  } catch {}
+  updateAdUI();
+}
+
+// ---- Deteksi adblocker ----
+function detectAdblock() {
+  return new Promise((resolve) => {
+    // metode 1: elemen umpan yang biasa diblokir adblocker
+    const bait = document.createElement("div");
+    bait.className = "adsbox ad-banner ad-placement pub_300x250 text-ad ads ad-slot";
+    bait.style.cssText = "position:absolute;left:-9999px;top:-9999px;height:10px;width:10px;pointer-events:none";
+    bait.innerHTML = "&nbsp;";
+    document.body.appendChild(bait);
+    // metode 2: skrip iklan umpan
+    let scriptBlocked = false;
+    const s = document.createElement("script");
+    s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
+    s.onerror = () => { scriptBlocked = true; };
+    document.head.appendChild(s);
+    setTimeout(() => {
+      const baitBlocked = !bait.offsetParent || bait.offsetHeight === 0 ||
+        getComputedStyle(bait).display === "none" || getComputedStyle(bait).visibility === "hidden";
+      bait.remove(); s.remove();
+      resolve(Boolean(baitBlocked) || scriptBlocked);
+    }, 700);
+  });
+}
+function showAdblockWall() {
+  return new Promise((resolve) => {
+    const m = $("adblock-modal"); m.classList.add("show"); setStatus($("adblock-status"), "");
+    $("adblock-retry").onclick = async () => {
+      setStatus($("adblock-status"), "Mengecek…");
+      if (!(await detectAdblock())) { m.classList.remove("show"); setStatus($("adblock-status"), ""); resolve(); }
+      else setStatus($("adblock-status"), "Masih terdeteksi. Nonaktifkan, lalu muat ulang halaman.", "err");
+    };
+    $("adblock-buy").onclick = () => { m.classList.remove("show"); openOffer(); resolve(); };
+  });
+}
+
+// Tampilkan iklan; kalau adblock terdeteksi -> paksa dinding anti-adblock.
+async function showAd() {
+  if (await detectAdblock()) { await showAdblockWall(); return; }
+  return new Promise((resolve) => {
+    const modal = $("ad-modal"), frame = $("ad-frame"), ph = $("ad-placeholder"), btn = $("ad-close");
+    if (ADSTERRA_HTML.trim()) {
+      frame.srcdoc = `<!doctype html><meta charset=utf-8><style>body{margin:0;display:flex;align-items:center;justify-content:center}</style>${ADSTERRA_HTML}`;
+      frame.style.display = "block"; ph.style.display = "none";
+    } else { frame.style.display = "none"; ph.style.display = "block"; }
+    modal.classList.add("show");
+    let s = 5; btn.disabled = true; btn.textContent = `Tutup (${s})`;
+    const t = setInterval(() => {
+      s--; btn.textContent = s > 0 ? `Tutup (${s})` : "Tutup";
+      if (s <= 0) { clearInterval(t); btn.disabled = false; }
+    }, 1000);
+    btn.onclick = () => {
+      if (btn.disabled) return;
+      clearInterval(t); modal.classList.remove("show"); frame.srcdoc = ""; resolve();
+    };
+  });
+}
+
+// Dipanggil setelah SETIAP generate selesai. Iklan muncul di generate ke-2, 4, 6, ...
+async function afterGen() {
+  if (AD_FREE) return;
+  genCount++;
+  if (genCount % 2 === 0) await showAd();
+}
+
+// ---- Penawaran & pembayaran ----
+function openOffer() {
+  if (!USERNAME) { $("login").classList.add("show"); return; }
+  $("offer-user").textContent = USERNAME;
+  $("price-week").textContent = PRICE_WEEK;
+  $("price-month").textContent = PRICE_MONTH;
+  setStatus($("offer-status"), "");
+  $("offer").classList.add("show");
+}
+// plan: "w" (mingguan) atau "m" (bulanan)
+function buyNow(plan) {
+  const url0 = plan === "w" ? BUY_URL_WEEK : BUY_URL_MONTH;
+  if (!url0) { setStatus($("offer-status"), "Link pembayaran belum diatur di server.", "err"); return; }
+  // Username + paket dibawa otomatis: "username__PLAN__waktu"
+  const orderId = `${USERNAME}__${plan}__${Date.now()}`;
+  const sep = url0.includes("?") ? "&" : "?";
+  window.open(`${url0}${sep}order_id=${encodeURIComponent(orderId)}`, "_blank");
+  setStatus($("offer-status"), "Setelah bayar, tekan \"Saya sudah bayar\".", "");
+}
+async function paidCheck() {
+  setStatus($("offer-status"), "Mengecek pembayaran…");
+  await refreshAdFree();
+  if (AD_FREE) {
+    setStatus($("offer-status"), "Berhasil! Iklan sudah dimatikan. 🎉", "ok");
+    setTimeout(() => $("offer").classList.remove("show"), 1200);
+  } else {
+    setStatus($("offer-status"), "Belum terdeteksi. Tunggu sebentar lalu coba lagi.", "err");
+  }
+}
+$("removeAdsBtn").addEventListener("click", openOffer);
+$("offer-x").addEventListener("click", () => $("offer").classList.remove("show"));
+$("offer-buy-week").addEventListener("click", () => buyNow("w"));
+$("offer-buy-month").addEventListener("click", () => buyNow("m"));
+$("offer-paid").addEventListener("click", paidCheck);
+$("ad-remove").addEventListener("click", () => { $("ad-modal").classList.remove("show"); openOffer(); });
+// ===============================================================
 
 // ---- tag palette ----
 function buildTagPalette() {
@@ -531,6 +736,7 @@ $("tts-go").addEventListener("click", async () => {
     out.innerHTML = `<label class="field">Hasil</label>` + statsCard(chunks.length, secs, text.length);
     out.appendChild(audioBlockFromBlob(merged, "voicepromax-tts." + fmt()));
     setStatus($("tts-status"), `Selesai — ${chunks.length} bagian dalam ${secs.toFixed(1)} detik.`, "ok");
+    afterGen();
   } catch (e) { setStatus($("tts-status"), e.message, "err"); }
   finally { $("tts-go").disabled = false; }
 });
@@ -545,6 +751,7 @@ $("expr-go").addEventListener("click", async () => {
     const blob = await postJSON("/api/speech", body, true);
     $("expr-out").innerHTML = ""; $("expr-out").appendChild(audioBlockFromBlob(blob, "voicepromax-ekspresi." + fmt()));
     setStatus($("expr-status"), "Selesai.", "ok");
+    afterGen();
   } catch (e) { setStatus($("expr-status"), e.message, "err"); }
   finally { $("expr-go").disabled = false; }
 });
@@ -691,6 +898,7 @@ $("clone-go").addEventListener("click", async () => {
     out.innerHTML = `<label class="field">Hasil</label>` + statsCard(chunks.length, secs, text.length);
     out.appendChild(audioBlockFromBlob(merged, "voicepromax-kloning." + fmt()));
     setStatus($("clone-status"), `Selesai — ${chunks.length} bagian dalam ${secs.toFixed(1)} detik.`, "ok");
+    afterGen();
   } catch (e) { setStatus($("clone-status"), e.message, "err"); }
   finally { $("clone-go").disabled = false; }
 });
@@ -743,6 +951,7 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix) {
     out.appendChild(foot);
   }
   setStatus($(statusId), "Selesai — " + turns.length + " giliran.", "ok");
+  afterGen();
   btn.disabled = false;
 }
 $("pod-go").addEventListener("click", () => runMulti("pod-script", "pod-speakers", "pod-status", "pod-out", $("pod-go"), "podcast"));
@@ -770,6 +979,7 @@ $("batch-go").addEventListener("click", async () => {
     }
   }
   setStatus($("batch-status"), "Selesai.", "ok");
+  afterGen();
   $("batch-go").disabled = false;
 });
 
