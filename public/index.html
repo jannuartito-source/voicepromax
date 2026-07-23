@@ -449,7 +449,7 @@ $("loginPass").addEventListener("keydown", (e) => { if (e.key === "Enter") doLog
 // ================== SISTEM IKLAN & HAPUS IKLAN ==================
 // >>> TEMPEL KODE BANNER ADSTERRA KAMU DI DALAM TANDA BACKTICK DI BAWAH INI <<<
 // Ambil dari dashboard Adsterra: Websites -> Add code -> Banner 300x250.
-// Salin SELURUH kode <script>...</script> yang mereka beri, taruh di antara backtick.
+// Salin SELURUH kode <script>...<\/script> yang mereka beri, taruh di antara backtick.
 // Biarkan kosong kalau belum punya (nanti muncul kotak "Slot iklan" saja).
 const ADSTERRA_HTML = `<script type="text/javascript">
   atOptions = {
@@ -459,8 +459,8 @@ const ADSTERRA_HTML = `<script type="text/javascript">
     'width' : 300,
     'params' : {}
   };
-</script>
-<script src="https://www.highperformanceformat.com/9f0b15835dee82ee831b130b0700a681/invoke.js"></script>`;
+<\/script>
+<script src="https://www.highperformanceformat.com/9f0b15835dee82ee831b130b0700a681/invoke.js"><\/script>`;
 
 function updateAdUI() {
   const loggedIn = Boolean(USERNAME);
