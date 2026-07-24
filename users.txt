@@ -7,7 +7,7 @@
 # - Kalau SEMUA baris user dihapus/dikomentari -> web jadi TERBUKA (tanpa login).
 #
 # Contoh (hapus tanda # di depannya untuk mengaktifkan):
-admin:rahasia123
+*admin:rahasia123
 budi:rahasia123
 siti:12345
 wibi:123
