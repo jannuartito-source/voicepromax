@@ -667,14 +667,39 @@ async function runPool(items, worker, concurrency, onProgress) {
 }
 
 // satu potongan -> audio (dengan retry kalau kena rate limit/gagal sesaat)
+// Ukur durasi audio (detik) dari blob, tanpa mendekode penuh.
+function measureDuration(blob) {
+  return new Promise((resolve) => {
+    const a = new Audio();
+    a.preload = "metadata";
+    const url = URL.createObjectURL(blob);
+    a.onloadedmetadata = () => { const d = a.duration; URL.revokeObjectURL(url); resolve(isFinite(d) ? d : 0); };
+    a.onerror = () => { URL.revokeObjectURL(url); resolve(0); };
+    a.src = url;
+  });
+}
+
 async function speechChunk(input, voiceBody, tries = 3) {
+  // Batas durasi wajar untuk panjang teks ini. Kalau hasil jauh lebih panjang =
+  // model "ngelantur" (runaway) -> generate ulang. (Meniru anti-разнос engine Higgs.)
+  const maxSec = input.length * 0.15 + 6;
+  let best = null, bestDur = Infinity;
   for (let a = 1; a <= tries; a++) {
-    try { return await postJSON("/api/speech", { input, ...voiceBody }, true); }
-    catch (e) {
+    let blob;
+    try {
+      blob = await postJSON("/api/speech", { input, ...voiceBody }, true);
+    } catch (e) {
       if (a === tries) throw e;
-      await new Promise((r) => setTimeout(r, 800 * a)); // tunggu lalu coba lagi
+      await new Promise((r) => setTimeout(r, 800 * a)); // gagal jaringan -> tunggu & ulang
+      continue;
     }
+    const dur = await measureDuration(blob);
+    if (!dur) return blob;                       // tak terukur -> pakai apa adanya
+    if (dur < bestDur) { best = blob; bestDur = dur; }
+    if (dur <= maxSec) return blob;              // durasi wajar -> pakai
+    if (a < tries) await new Promise((r) => setTimeout(r, 300)); // ngelantur -> coba lagi
   }
+  return best;                                   // semua ngelantur -> ambil yang paling pendek
 }
 
 // gabung beberapa WAV jadi satu (byte-level, hemat memori) — untuk teks panjang
