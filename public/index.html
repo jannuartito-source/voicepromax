@@ -227,6 +227,7 @@
               <input type="file" id="clone-file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.webm,audio/*" />
             </div>
           </div>
+          <audio id="file-preview" controls style="display:none;margin-top:8px"></audio>
           <div class="row" style="margin-top:8px">
             <button class="ghost" id="rec-btn" type="button">🎙️ Mulai rekam</button>
             <span class="hint" id="rec-status" style="margin:0"></span>
@@ -834,6 +835,7 @@ $("rec-btn").addEventListener("click", async () => {
       const url = URL.createObjectURL(recordedBlob);
       const pv = $("rec-preview"); pv.src = url; pv.style.display = "block";
       $("clone-file").value = ""; // rekaman menggantikan file unggahan
+      $("file-preview").style.display = "none";
       $("rec-btn").textContent = "🎙️ Rekam ulang";
       setStatus($("rec-status"), "Rekaman siap dipakai.", "ok");
     };
@@ -852,13 +854,19 @@ $("rec-btn").addEventListener("click", async () => {
   }
 });
 
-// Kalau user memilih file unggahan, batalkan rekaman agar tidak bentrok.
+// Kalau user memilih file unggahan, tampilkan preview & batalkan rekaman agar tidak bentrok.
 $("clone-file").addEventListener("change", () => {
-  if ($("clone-file").files[0]) {
+  const f = $("clone-file").files[0];
+  if (f) {
     recordedBlob = null;
     $("rec-preview").style.display = "none";
     $("rec-btn").textContent = "🎙️ Mulai rekam";
     setStatus($("rec-status"), "");
+    const pv = $("file-preview");
+    pv.src = URL.createObjectURL(f);
+    pv.style.display = "block"; // user bisa dengar dulu sebelum generate
+  } else {
+    $("file-preview").style.display = "none";
   }
 });
 
