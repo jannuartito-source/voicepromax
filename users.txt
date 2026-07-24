@@ -10,7 +10,7 @@
 *admin:rahasia123
 budi:rahasia123
 siti:12345
-wibi:123
+*wibi:123
 andredc:rahasia123
 voice101:rahasia123
 voice102:rahasia123
