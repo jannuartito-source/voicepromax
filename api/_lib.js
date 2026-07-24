@@ -70,8 +70,10 @@ export function graceInfo(joinedTs) {
 }
 
 // ---------- user & login (stateless, cocok untuk serverless) ----------
-export function readUsers() {
-  const users = new Map();
+// Baca users.txt. Baris boleh diberi tanda "*" di depan username = VIP (bebas iklan selamanya).
+// Contoh:  *budi:passbudi   -> user budi tidak pernah kena iklan.
+function parseUsers() {
+  const rows = [];
   try {
     const txt = fs.readFileSync(USERS_FILE, "utf8");
     for (const raw of txt.split(/\r?\n/)) {
@@ -79,10 +81,28 @@ export function readUsers() {
       if (!line || line.startsWith("#")) continue;
       const i = line.indexOf(":");
       if (i <= 0) continue;
-      users.set(line.slice(0, i).trim(), line.slice(i + 1).trim());
+      let user = line.slice(0, i).trim();
+      const pass = line.slice(i + 1).trim();
+      let vip = false;
+      if (user.startsWith("*")) { vip = true; user = user.slice(1).trim(); }
+      if (user) rows.push({ user, pass, vip });
     }
   } catch {}
+  return rows;
+}
+export function readUsers() {
+  const users = new Map();
+  for (const r of parseUsers()) users.set(r.user, r.pass);
   return users;
+}
+// Kumpulan username VIP (bebas iklan permanen).
+export function vipUsers() {
+  const set = new Set();
+  for (const r of parseUsers()) if (r.vip) set.add(r.user.toLowerCase());
+  return set;
+}
+export function isVip(username) {
+  return vipUsers().has(String(username || "").trim().toLowerCase());
 }
 export function loginEnabled() { return readUsers().size > 0; }
 
