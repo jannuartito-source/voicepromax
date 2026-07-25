@@ -808,7 +808,35 @@ function encodeWav(samples, sampleRate) {
   }
   return new Blob([view], { type: "audio/wav" });
 }
-// Ubah audio jadi WAV mono 16 kHz, dipotong maks 25 detik.
+
+// Gabungkan beberapa audio jadi satu WAV yang MULUS + beri sedikit jeda di awal,
+// supaya awal kata tidak terpotong (fix kliping pada kloning). Mendekode tiap potongan
+// ke PCM lalu menyambungnya (bukan menempel byte mp3, yang bisa bikin bunyi terpotong).
+async function joinPcmPad(blobs, leadMs = 200, gapMs = 60) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  let sr = 24000;
+  const parts = [];
+  for (const b of blobs) {
+    const dec = await ctx.decodeAudioData(await b.arrayBuffer());
+    sr = dec.sampleRate;
+    const len = dec.length, mono = new Float32Array(len);
+    for (let c = 0; c < dec.numberOfChannels; c++) {
+      const d = dec.getChannelData(c);
+      for (let i = 0; i < len; i++) mono[i] += d[i] / dec.numberOfChannels;
+    }
+    parts.push(mono);
+  }
+  if (ctx.close) ctx.close();
+  const lead = Math.floor((sr * leadMs) / 1000);
+  const gap = Math.floor((sr * gapMs) / 1000);
+  let total = lead;
+  parts.forEach((p, i) => { total += p.length + (i < parts.length - 1 ? gap : 0); });
+  const out = new Float32Array(total);
+  let o = lead;
+  parts.forEach((p, i) => { out.set(p, o); o += p.length + (i < parts.length - 1 ? gap : 0); });
+  return encodeWav(out, sr);
+}
 // Ukuran jadi kecil (± < 1 MB) supaya tidak menembus batas Vercel (413).
 async function toWavDataURL(src, targetSR = 16000, maxSec = 25) {
   const ab = await src.arrayBuffer();
@@ -925,11 +953,11 @@ $("clone-go").addEventListener("click", async () => {
       2,
       (done, tot) => setStatus($("clone-status"), `Menghasilkan… ${done}/${tot} bagian`)
     );
-    const merged = await mergeAudio(blobs, fmt());
+    const merged = await joinPcmPad(blobs).catch(() => mergeAudio(blobs, "wav"));
     const secs = (performance.now() - t0) / 1000;
     const out = $("clone-out");
     out.innerHTML = `<label class="field">Hasil</label>` + statsCard(chunks.length, secs, text.length);
-    out.appendChild(audioBlockFromBlob(merged, "voicepromax-kloning." + fmt()));
+    out.appendChild(audioBlockFromBlob(merged, "voicepromax-kloning.wav"));
     setStatus($("clone-status"), `Selesai — ${chunks.length} bagian dalam ${secs.toFixed(1)} detik.`, "ok");
     afterGen();
   } catch (e) { setStatus($("clone-status"), e.message, "err"); }
