@@ -157,7 +157,7 @@
     <div class="box" style="width:360px;text-align:center">
       <div style="font-size:34px;margin:4px 0 6px">🚫</div>
       <h3 style="margin:0 0 6px">Adblocker terdeteksi</h3>
-      <p class="hint" style="margin:0 0 14px">Layanan ini gratis berkat iklan. Nonaktifkan adblocker untuk lanjut, atau pilih Hapus Iklan agar tidak ada iklan sama sekali.</p>
+      <p class="hint" style="margin:0 0 14px">Layanan ini gratis berkat iklan. Nonaktifkan adblocker khusus situs ini untuk lanjut, atau berlangganan Hapus Iklan supaya tidak ada iklan sama sekali.</p>
       <button class="go" id="adblock-retry" style="width:100%">Saya sudah nonaktifkan — coba lagi</button>
       <button class="ghost" id="adblock-buy" style="width:100%;margin-top:8px;border-color:var(--sky);color:var(--sky-2)">✨ Hapus Iklan</button>
       <div class="status" id="adblock-status" style="text-align:center"></div>
@@ -187,7 +187,7 @@
 
     <div class="toolbar">
       <label>Format keluaran</label>
-      <select id="fmt"><option value="mp3">mp3</option><option value="wav">wav</option></select>
+      <span class="hint" style="margin:0">WAV 24 kHz — tanpa kompresi, supaya tidak ada derau tambahan</span>
       <span class="hint" id="cfgHint"></span>
       <span style="flex:1"></span>
       <button class="ghost" id="removeAdsBtn" style="display:none;border-color:var(--sky);color:var(--sky-2)">✨ Hapus Iklan</button>
@@ -261,8 +261,9 @@
               <select id="clone-preset" class="grow"></select>
             </div>
           </div>
-          <label class="field" style="margin-top:12px">Transkrip audio referensi (opsional, tingkatkan kualitas)</label>
+          <label class="field" style="margin-top:12px">Transkrip audio referensi (sangat disarankan)</label>
           <textarea id="clone-reftext" rows="2" placeholder="Kalimat persis yang diucapkan di audio referensi..."></textarea>
+          <div class="hint">Tulis persis kalimat di audio referensi. Kalau dikosongkan, model kadang "melanjutkan" audio referensi dan memunculkan bunyi asing sebelum kata pertama.</div>
           <div class="row"><button class="go" id="clone-go">Kloning &amp; hasilkan</button></div>
           <div class="hint">⚠️ Hanya klon suara yang kamu punya haknya. Dilarang meniru suara orang tanpa izin.</div>
           <div class="status" id="clone-status"></div>
@@ -374,7 +375,7 @@ async function postJSON(path, body, wantBlob) {
   return wantBlob ? res.blob() : res.json();
 }
 function setStatus(el, msg, kind) { el.textContent = msg; el.className = "status" + (kind ? " " + kind : ""); }
-function fmt() { return $("fmt").value; }
+function fmt() { return "wav"; }   // keluaran selalu WAV: MP3 menambah artefak di sambungan
 function audioBlockFromBlob(blob, name) {
   const url = URL.createObjectURL(blob);
   const div = document.createElement("div");
@@ -425,7 +426,8 @@ async function init() {
 
   if (USERNAME) await refreshAdFree(); // segarkan status saat halaman dibuka
   updateAdUI();
-  if (!AD_FREE && (await detectAdblock())) showAdblockWall(); // paksa nonaktifkan adblock
+  // Pemeriksaan adblock hanya jalan kalau user SUDAH login dan statusnya gratis.
+  maybeAdblockWall();
 }
 
 // ---- tabs ----
@@ -466,6 +468,8 @@ async function doLogin() {
     $("login").classList.remove("show");
     setStatus($("loginErr"), "");
     updateAdUI();
+    if (PENDING_OFFER) { PENDING_OFFER = false; openOffer(); }
+    else maybeAdblockWall();   // adblocker baru diperiksa setelah user masuk
   } catch (e) { setStatus($("loginErr"), e.message, "err"); }
 }
 $("loginBtn").addEventListener("click", doLogin);
@@ -492,7 +496,10 @@ function updateAdUI() {
   // Tombol "Hapus Iklan" hanya muncul kalau iklan memang sedang aktif (bukan bebas iklan).
   $("removeAdsBtn").style.display = (loggedIn && !AD_FREE) ? "inline-block" : "none";
   // Badge hanya untuk yang BENAR-BENAR sudah membayar. Masa 2 minggu awal: tanpa label apa pun.
-  $("adFreeBadge").style.display = PAID ? "inline" : "none";
+  const badge = $("adFreeBadge");
+  if (PAID) { badge.textContent = "✓ Bebas iklan aktif"; badge.style.display = "inline"; }
+  else if (loggedIn && AD_FREE) { badge.textContent = "✓ Masa percobaan — bebas iklan"; badge.style.display = "inline"; }
+  else badge.style.display = "none";
 }
 
 // Segarkan status bebas iklan dari server (dipakai saat "sudah bayar" / buka halaman).
@@ -506,44 +513,91 @@ async function refreshAdFree() {
   updateAdUI();
 }
 
-// ---- Deteksi adblocker ----
-function detectAdblock() {
+// ---- Deteksi adblocker (3 sinyal, supaya tidak lolos) ----
+// Diambil otomatis dari kode Adsterra di atas, jadi ikut berubah kalau key-nya diganti.
+const AD_TEST_URL = (ADSTERRA_HTML.match(/src="([^"]+invoke\.js)"/) || [])[1] ||
+                    "https://www.highperformanceformat.com/invoke.js";
+let ADBLOCK_CACHE = null;
+
+// Sinyal 1: elemen umpan dengan nama kelas/id yang biasa disembunyikan adblocker.
+function baitTest() {
   return new Promise((resolve) => {
-    // metode 1: elemen umpan yang biasa diblokir adblocker
     const bait = document.createElement("div");
-    bait.className = "adsbox ad-banner ad-placement pub_300x250 text-ad ads ad-slot";
-    bait.style.cssText = "position:absolute;left:-9999px;top:-9999px;height:10px;width:10px;pointer-events:none";
+    bait.className = "adsbox ad-banner ad-placement pub_300x250 text-ad ads ad-slot sponsored-ad banner-ads adsbygoogle";
+    bait.id = "AdContainer";
+    bait.setAttribute("data-ad-client", "ca-pub-0000000000000000");
+    bait.style.cssText = "position:absolute;left:-9999px;top:-9999px;height:12px;width:320px;pointer-events:none";
     bait.innerHTML = "&nbsp;";
     document.body.appendChild(bait);
-    // metode 2: skrip iklan umpan
-    let scriptBlocked = false;
-    const s = document.createElement("script");
-    s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js";
-    s.onerror = () => { scriptBlocked = true; };
-    document.head.appendChild(s);
     setTimeout(() => {
-      const baitBlocked = !bait.offsetParent || bait.offsetHeight === 0 ||
-        getComputedStyle(bait).display === "none" || getComputedStyle(bait).visibility === "hidden";
-      bait.remove(); s.remove();
-      resolve(Boolean(baitBlocked) || scriptBlocked);
-    }, 700);
+      const cs = getComputedStyle(bait);
+      const blocked = bait.offsetHeight === 0 || bait.clientHeight === 0 ||
+        cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0";
+      bait.remove();
+      resolve(Boolean(blocked));
+    }, 250);
   });
 }
+// Sinyal 2: permintaan jaringan ke domain iklan. Diblokir -> fetch gagal.
+// Habis waktu dianggap TIDAK diblokir, supaya koneksi lambat tidak kena tuduh.
+function urlTest(url, ms = 2500) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => { if (!settled) { settled = true; resolve(v); } };
+    const t = setTimeout(() => finish(false), ms);
+    fetch(url, { mode: "no-cors", cache: "no-store" })
+      .then(() => { clearTimeout(t); finish(false); })
+      .catch(() => { clearTimeout(t); finish(true); });
+  });
+}
+// Sinyal 3: muat skrip iklan sungguhan.
+function scriptTest(url, ms = 2500) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const s = document.createElement("script");
+    const finish = (v) => { if (!settled) { settled = true; s.remove(); resolve(v); } };
+    const t = setTimeout(() => finish(false), ms);
+    s.onload = () => { clearTimeout(t); finish(false); };
+    s.onerror = () => { clearTimeout(t); finish(true); };
+    s.src = url;
+    document.head.appendChild(s);
+  });
+}
+async function detectAdblock(force) {
+  if (!force && ADBLOCK_CACHE !== null) return ADBLOCK_CACHE;
+  const sinyal = await Promise.all([
+    baitTest(),
+    scriptTest("https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"),
+    urlTest(AD_TEST_URL),
+  ]);
+  ADBLOCK_CACHE = sinyal.some(Boolean);
+  return ADBLOCK_CACHE;
+}
+
+// Dinding anti-adblock. HANYA dipanggil untuk user gratis yang sudah login.
 function showAdblockWall() {
   return new Promise((resolve) => {
     const m = $("adblock-modal"); m.classList.add("show"); setStatus($("adblock-status"), "");
     $("adblock-retry").onclick = async () => {
       setStatus($("adblock-status"), "Mengecek…");
-      if (!(await detectAdblock())) { m.classList.remove("show"); setStatus($("adblock-status"), ""); resolve(); }
-      else setStatus($("adblock-status"), "Masih terdeteksi. Nonaktifkan, lalu muat ulang halaman.", "err");
+      if (!(await detectAdblock(true))) { m.classList.remove("show"); setStatus($("adblock-status"), ""); resolve(); }
+      else setStatus($("adblock-status"), "Masih terdeteksi. Nonaktifkan khusus situs ini, lalu tekan tombol di atas.", "err");
     };
-    $("adblock-buy").onclick = () => { m.classList.remove("show"); openOffer(); resolve(); };
+    // Tombol "Hapus Iklan" -> buka penawaran mingguan/bulanan (bukan sekadar menutup).
+    $("adblock-buy").onclick = () => { m.classList.remove("show"); resolve(); openOffer(); };
   });
 }
 
+// Dipanggil SESUDAH login / sesudah status diketahui.
+// VIP, sudah bayar, dan yang masih dalam masa percobaan 14 hari tidak pernah kena.
+async function maybeAdblockWall() {
+  if (!USERNAME || AD_FREE) return;
+  if (await detectAdblock(true)) await showAdblockWall();
+}
 // Tampilkan iklan; kalau adblock terdeteksi -> paksa dinding anti-adblock.
 async function showAd() {
-  if (await detectAdblock()) { await showAdblockWall(); return; }
+  if (AD_FREE || !USERNAME) return;
+  if (await detectAdblock(true)) { await showAdblockWall(); return; }
   return new Promise((resolve) => {
     const modal = $("ad-modal"), frame = $("ad-frame"), ph = $("ad-placeholder"), btn = $("ad-close");
     if (ADSTERRA_HTML.trim()) {
@@ -564,15 +618,19 @@ async function showAd() {
 }
 
 // Dipanggil setelah SETIAP generate selesai. Iklan muncul di generate ke-2, 4, 6, ...
+// Iklan HANYA untuk user gratis yang sudah login.
+// VIP, sudah bayar, dan masa percobaan 14 hari -> tidak pernah muncul.
 async function afterGen() {
-  if (AD_FREE) return;
+  if (AD_FREE || !USERNAME) return;
   genCount++;
   if (genCount % 2 === 0) await showAd();
 }
 
 // ---- Penawaran & pembayaran ----
+let PENDING_OFFER = false;
 function openOffer() {
-  if (!USERNAME) { $("login").classList.add("show"); return; }
+  // Belum login: tampilkan login dulu, penawaran dibuka otomatis setelah masuk.
+  if (!USERNAME) { PENDING_OFFER = true; $("login").classList.add("show"); return; }
   $("offer-user").textContent = USERNAME;
   $("price-week").textContent = PRICE_WEEK;
   $("price-month").textContent = PRICE_MONTH;
@@ -594,6 +652,7 @@ async function paidCheck() {
   await refreshAdFree();
   if (AD_FREE) {
     setStatus($("offer-status"), "Berhasil! Iklan sudah dimatikan. 🎉", "ok");
+    $("adblock-modal").classList.remove("show");
     setTimeout(() => $("offer").classList.remove("show"), 1200);
   } else {
     setStatus($("offer-status"), "Belum terdeteksi. Tunggu sebentar lalu coba lagi.", "err");
@@ -801,8 +860,9 @@ async function speechChunk(input, voiceBody, tries = 3) {
   // Terlalu panjang  = model "ngelantur" (runaway).
   // Terlalu pendek   = hasil TERPOTONG (kata tidak selesai diucapkan)  <-- ini yang dulu lolos.
   const expect = input.length * 0.075;
-  const maxSec = expect * 2.2 + 6;
-  const minSec = Math.max(0.6, expect * 0.45);
+  const longgar = /<\|/.test(input) ? 1.8 : 1;   // teks bertag jeda boleh lebih panjang
+  const maxSec = (expect * 1.6 + 3.5) * longgar;
+  const minSec = Math.max(0.5, expect * 0.5);
   let best = null, bestScore = Infinity;
   for (let a = 1; a <= tries; a++) {
     let blob;
@@ -849,16 +909,17 @@ async function concatWav(blobs) {
   wr(36, "data"); h.setUint32(40, total, true);
   return new Blob([h, ...datas], { type: "audio/wav" });
 }
-// Selalu gabung lewat PCM (decode -> sambung -> encode WAV).
-// Menempel byte MP3 mentah = sumber "klik"/noise di tiap sambungan, jadi tidak dipakai lagi.
-async function mergeAudio(blobs, format) {
-  const list = (blobs || []).filter(Boolean);
-  if (!list.length) throw new Error("Tidak ada audio yang berhasil dibuat.");
-  if (list.length === 1) return { blob: list[0], ext: format || "wav" };
-  try { return { blob: await joinPcmPad(list), ext: "wav" }; }
+// SELALU lewat PCM (decode -> bersihkan -> sambung -> encode WAV),
+// termasuk saat potongannya cuma satu — supaya derau di awal kata ikut dibuang.
+async function mergeAudio(blobs, texts) {
+  const keep = [], keepTexts = [];
+  (blobs || []).forEach((b, i) => { if (b) { keep.push(b); keepTexts.push(texts?.[i] || ""); } });
+  if (!keep.length) throw new Error("Tidak ada audio yang berhasil dibuat.");
+  try { return { blob: await joinPcmPad(keep, keepTexts), ext: "wav" }; }
   catch {
-    if (format === "wav") return { blob: await concatWav(list), ext: "wav" };
-    return { blob: new Blob(list, { type: "audio/mpeg" }), ext: "mp3" };
+    // cadangan kalau Web Audio tidak tersedia / gagal mendekode
+    if (keep.length === 1) return { blob: keep[0], ext: "wav" };
+    return { blob: await concatWav(keep), ext: "wav" };
   }
 }
 
@@ -881,8 +942,8 @@ $("tts-go").addEventListener("click", async () => {
       CONCURRENCY,
       (done, tot) => prog.set(4 + (done / tot) * 90)
     );
-    prog.set(96, "Menggabungkan…");
-    const { blob, ext } = await mergeAudio(blobs, fmt());
+    prog.set(96, "Merapikan & menggabungkan…");
+    const { blob, ext } = await mergeAudio(blobs, chunks);
     const out = $("tts-out");
     out.innerHTML = `<label class="field">Hasil</label>` + doneCard("Suara Sudah Jadi");
     out.appendChild(audioBlockFromBlob(blob, "voicepromax-tts." + ext));
@@ -902,11 +963,12 @@ $("expr-go").addEventListener("click", async () => {
   try {
     const body = { response_format: fmt(), ...resolveVoice($("expr-voice").value) };
     prog.set(35);
-    const blob = await speechChunk(text, body);
-    prog.set(95);
+    const raw = await speechChunk(text, body);
+    prog.set(90, "Merapikan…");
+    const { blob } = await mergeAudio([raw], [text]);
     const out = $("expr-out");
     out.innerHTML = doneCard("Suara Sudah Jadi");
-    out.appendChild(audioBlockFromBlob(blob, "voicepromax-ekspresi." + fmt()));
+    out.appendChild(audioBlockFromBlob(blob, "voicepromax-ekspresi.wav"));
     prog.finish("Selesai");
     setTimeout(() => setStatus($("expr-status"), ""), 1500);
     afterGen();
@@ -941,62 +1003,130 @@ function encodeWav(samples, sampleRate) {
   return new Blob([view], { type: "audio/wav" });
 }
 
-// ---- perapian audio per potongan (menghilangkan noise/klik di sambungan) ----
+// ---- pembersihan audio per potongan ----
+// Model TTS sering menyisipkan transien/derau pendek TEPAT SEBELUM kata pertama
+// (sisa "pemanasan" dari audio referensi). Bagian ini yang membuangnya.
 
 // Buang DC offset. Beda DC antar potongan = "tik" keras waktu disambung.
 function removeDC(buf) {
   let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i];
   const dc = sum / (buf.length || 1);
-  if (Math.abs(dc) > 1e-5) for (let i = 0; i < buf.length; i++) buf[i] -= dc;
+  if (Math.abs(dc) > 1e-6) for (let i = 0; i < buf.length; i++) buf[i] -= dc;
   return buf;
 }
-// Rapikan hening panjang di ujung, TAPI selalu sisakan margin 60 ms
-// supaya awal kata (konsonan lembut seperti "s", "h", "f") tidak ikut terpotong.
-function trimSilence(buf, sr, thr = 0.0025, keepMs = 60) {
-  const keep = Math.floor((sr * keepMs) / 1000);
-  let a = 0, b = buf.length - 1;
-  while (a < buf.length && Math.abs(buf[a]) < thr) a++;
-  while (b > a && Math.abs(buf[b]) < thr) b--;
-  if (a >= b) return buf;                       // seluruhnya hening -> biarkan
-  a = Math.max(0, a - keep);
-  b = Math.min(buf.length - 1, b + keep);
-  if (a === 0 && b === buf.length - 1) return buf;
-  return buf.subarray(a, b + 1);
-}
-// Fade 8 ms di kedua ujung: memutus lompatan gelombang yang terdengar sebagai "klik".
-function applyFade(buf, n) {
-  const m = Math.min(n, Math.floor(buf.length / 2));
-  for (let i = 0; i < m; i++) { const g = i / m; buf[i] *= g; buf[buf.length - 1 - i] *= g; }
+// Tapis lolos-tinggi 70 Hz: membuang dengung/gemuruh rendah yang terdengar
+// sebagai "noise" walau tidak ada suara.
+function highPass(buf, sr, fc = 70) {
+  const rc = 1 / (2 * Math.PI * fc), dt = 1 / sr, a = rc / (rc + dt);
+  let yPrev = 0, xPrev = buf[0] || 0;
+  for (let i = 0; i < buf.length; i++) {
+    const x = buf[i];
+    const y = a * (yPrev + x - xPrev);
+    buf[i] = y; xPrev = x; yPrev = y;
+  }
   return buf;
 }
+function fadeIn(buf, n) { const m = Math.min(n, buf.length); for (let i = 0; i < m; i++) buf[i] *= i / m; return buf; }
+function fadeOut(buf, n) { const m = Math.min(n, buf.length); for (let i = 0; i < m; i++) buf[buf.length - 1 - i] *= i / m; return buf; }
+function applyFade(buf, n) { fadeIn(buf, n); fadeOut(buf, n); return buf; }
 function rmsOf(buf) {
-  let s = 0; const step = Math.max(1, Math.floor(buf.length / 20000));
-  let n = 0; for (let i = 0; i < buf.length; i += step) { s += buf[i] * buf[i]; n++; }
+  let s = 0, n = 0; const step = Math.max(1, Math.floor(buf.length / 20000));
+  for (let i = 0; i < buf.length; i += step) { s += buf[i] * buf[i]; n++; }
   return Math.sqrt(s / (n || 1));
 }
 
-// Gabungkan beberapa audio jadi satu WAV yang MULUS.
-// Tiap potongan didekode ke PCM, dibersihkan DC-nya, dirapikan heningnya,
-// disamakan kerasnya, lalu disambung dengan jeda pendek + fade.
-async function joinPcmPad(blobs, leadMs = 120, gapMs = 90) {
+// Cari batas SUARA ASLI memakai amplop energi 10 ms + dua ambang (histeresis).
+//  - Letupan/derau pendek di awal yang dipisahkan hening  -> DIBUANG.
+//  - Konsonan lembut (s, h, f) yang menyambung ke vokal    -> DIPERTAHANKAN.
+function speechBounds(buf, sr) {
+  const win = Math.max(1, Math.round(sr * 0.010));
+  const nF = Math.floor(buf.length / win);
+  if (nF < 4) return { start: 0, end: buf.length - 1 };
+  const env = new Float32Array(nF);
+  for (let f = 0; f < nF; f++) {
+    let s = 0; const o = f * win;
+    for (let i = 0; i < win; i++) { const v = buf[o + i]; s += v * v; }
+    env[f] = Math.sqrt(s / win);
+  }
+  const sorted = Array.from(env).sort((a, b) => a - b);
+  const floor = sorted[Math.floor(nF * 0.15)] || 0;    // lantai derau potongan ini
+  const peak = sorted[nF - 1] || 0;
+  if (peak < 2e-4) return null;                        // isinya hening semua
+  const hi = Math.max(floor * 5, peak * 0.08, 0.005);  // "ini benar-benar suara"
+  const lo = Math.max(floor * 2, hi * 0.30);           // "masih menyambung"
+  const need = 7;                                      // butuh 70 ms berturut-turut
+  const maxBack = 15;                                  // rangkul mundur maks 150 ms
+
+  const anchor = (from, dir) => {
+    let run = 0;
+    for (let f = from; f >= 0 && f < nF; f += dir) {
+      if (env[f] >= hi) { if (++run >= need) return f - dir * (run - 1); } else run = 0;
+    }
+    for (let f = from; f >= 0 && f < nF; f += dir) if (env[f] >= hi) return f;
+    return -1;
+  };
+  let a = anchor(0, 1);
+  if (a < 0) return null;
+  let b = anchor(nF - 1, -1);
+  if (b < 0) b = nF - 1;
+  let step = 0;
+  while (a > 0 && env[a - 1] >= lo && step++ < maxBack) a--;
+  step = 0;
+  while (b < nF - 1 && env[b + 1] >= lo && step++ < maxBack) b++;
+  if (b <= a) return null;
+  return { start: a * win, end: Math.min(buf.length - 1, (b + 1) * win - 1) };
+}
+
+// Bersihkan satu potongan: DC -> lolos-tinggi -> potong tepat di batas suara -> fade.
+// Mengembalikan null kalau potongan ternyata cuma derau (dibuang, tidak ikut digabung).
+function cleanChunk(buf, sr) {
+  removeDC(buf);
+  highPass(buf, sr, 70);
+  const b = speechBounds(buf, sr);
+  if (!b) return null;
+  const lead = Math.round(sr * 0.020);                 // sisakan 20 ms sebelum suara
+  const tail = Math.round(sr * 0.050);
+  const s = Math.max(0, b.start - lead);
+  const e = Math.min(buf.length - 1, b.end + tail);
+  const out = new Float32Array(e - s + 1);
+  out.set(buf.subarray(s, e + 1));
+  // fade-in 20 ms: sisa transien apa pun di 20 ms pertama jadi tidak terdengar
+  fadeIn(out, Math.min(Math.round(sr * 0.020), Math.floor(out.length / 2)));
+  fadeOut(out, Math.min(Math.round(sr * 0.015), Math.floor(out.length / 2)));
+  return out;
+}
+
+// Jeda setelah sebuah potongan, mengikuti tanda baca -> terdengar lebih natural.
+function gapFor(text) {
+  const t = (text || "").trim();
+  if (/[.!?…]["'”’)\]]*$/.test(t)) return 170;
+  if (/[,;:]$/.test(t)) return 90;
+  return 70;
+}
+
+// Gabungkan (atau bersihkan satu) audio jadi WAV yang mulus.
+// Dipakai JUGA saat potongannya cuma satu, supaya derau di awal tetap dibuang.
+async function joinPcmPad(blobs, texts) {
   const AC = window.AudioContext || window.webkitAudioContext;
   const ctx = new AC();
   let sr = 24000;
-  let parts = [];
+  let parts = [], keptTexts = [];
   try {
-    for (const b of blobs) {
-      const dec = await ctx.decodeAudioData(await b.arrayBuffer());
+    for (let k = 0; k < blobs.length; k++) {
+      const dec = await ctx.decodeAudioData(await blobs[k].arrayBuffer());
       sr = dec.sampleRate;
       const len = dec.length, mono = new Float32Array(len);
       for (let c = 0; c < dec.numberOfChannels; c++) {
         const d = dec.getChannelData(c);
         for (let i = 0; i < len; i++) mono[i] += d[i] / dec.numberOfChannels;
       }
-      parts.push(trimSilence(removeDC(mono), sr));
+      const cleaned = cleanChunk(mono, sr);
+      if (cleaned && cleaned.length > sr * 0.03) { parts.push(cleaned); keptTexts.push(texts?.[k] || ""); }
     }
   } finally { if (ctx.close) ctx.close(); }
+  if (!parts.length) throw new Error("Audio kosong setelah dibersihkan.");
 
-  // samakan kekerasan suara antar potongan (maks ±3 dB) supaya tidak "naik-turun"
+  // samakan kekerasan suara antar potongan (maks ±3 dB) supaya tidak naik-turun
   const rms = parts.map(rmsOf).filter((v) => v > 1e-6).sort((x, y) => x - y);
   const ref = rms.length ? rms[Math.floor(rms.length / 2)] : 0;
   if (ref > 1e-6) {
@@ -1010,19 +1140,15 @@ async function joinPcmPad(blobs, leadMs = 120, gapMs = 90) {
     });
   }
 
-  const fade = Math.max(8, Math.floor(sr * 0.008));
-  parts.forEach((p) => applyFade(p, fade));
-
-  const lead = Math.floor((sr * leadMs) / 1000);
-  const gap = Math.floor((sr * gapMs) / 1000);
-  let total = lead + Math.floor(sr * 0.05);
-  parts.forEach((p, i) => { total += p.length + (i < parts.length - 1 ? gap : 0); });
+  const lead = Math.round(sr * 0.040);                 // 40 ms hening bersih di awal
+  const gaps = parts.map((_, i) => (i < parts.length - 1 ? Math.round((sr * gapFor(keptTexts[i])) / 1000) : 0));
+  let total = lead + Math.round(sr * 0.06);
+  parts.forEach((p, i) => { total += p.length + gaps[i]; });
 
   const out = new Float32Array(total);
   let o = lead;
-  parts.forEach((p, i) => { out.set(p, o); o += p.length + (i < parts.length - 1 ? gap : 0); });
+  parts.forEach((p, i) => { out.set(p, o); o += p.length + gaps[i]; });
 
-  // jaga-jaga jangan sampai kelebihan (clipping) sesudah penyamaan volume
   let peak = 0; for (let i = 0; i < out.length; i++) { const v = Math.abs(out[i]); if (v > peak) peak = v; }
   if (peak > 0.99) { const g = 0.99 / peak; for (let i = 0; i < out.length; i++) out[i] *= g; }
   return encodeWav(out, sr);
@@ -1043,8 +1169,14 @@ async function toWavDataURL(src, targetSR = 24000, maxSec = 15) {
     const d = decoded.getChannelData(c);
     for (let i = 0; i < decoded.length; i++) full[i] += d[i] / decoded.numberOfChannels;
   }
-  // buang hening/napas di awal, lalu ambil maksimal maxSec detik
-  const trimmed = trimSilence(removeDC(full), decoded.sampleRate, 0.004, 40);
+  // Bersihkan referensi persis seperti hasil: DC, dengung rendah, dan
+  // hening/derau/napas di awal dibuang. Referensi kotor = hasil kloning kotor.
+  removeDC(full);
+  highPass(full, decoded.sampleRate, 70);
+  const b = speechBounds(full, decoded.sampleRate);
+  const from = b ? Math.max(0, b.start - Math.round(decoded.sampleRate * 0.02)) : 0;
+  const until = b ? Math.min(full.length, b.end + 1) : full.length;
+  const trimmed = full.subarray(from, until);
   const srcLen = Math.min(trimmed.length, Math.floor(decoded.sampleRate * maxSec));
   const monoIn = trimmed.subarray(0, srcLen);
 
@@ -1174,8 +1306,8 @@ $("clone-go").addEventListener("click", async () => {
       2,
       (done, tot) => prog.set(6 + (done / tot) * 88)
     );
-    prog.set(96, "Menggabungkan…");
-    const { blob } = await mergeAudio(blobs, "wav");
+    prog.set(96, "Merapikan & menggabungkan…");
+    const { blob } = await mergeAudio(blobs, chunks);
     const out = $("clone-out");
     out.innerHTML = `<label class="field">Hasil</label>` + doneCard("Kloning Sudah Jadi");
     out.appendChild(audioBlockFromBlob(blob, "voicepromax-kloning.wav"));
@@ -1228,30 +1360,31 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix, doneLabe
       conc,
       (done, tot) => prog.set(5 + (done / tot) * 88)
     );
-    prog.set(95, "Menggabungkan…");
+    prog.set(95, "Merapikan & menggabungkan…");
 
-    const perTurn = turns.map(() => []);
-    results.forEach((b, k) => perTurn[jobs[k].ti].push(b));
+    const perTurn = turns.map(() => ({ blobs: [], texts: [] }));
+    results.forEach((b, k) => { perTurn[jobs[k].ti].blobs.push(b); perTurn[jobs[k].ti].texts.push(jobs[k].c); });
 
-    const semua = [];
+    const semua = [], semuaTeks = [];
     const segs = document.createElement("div");
     for (let i = 0; i < turns.length; i++) {
       const { speaker, text } = turns[i];
-      const ok = perTurn[i].filter(Boolean);
+      const ok = [], okTeks = [];
+      perTurn[i].blobs.forEach((b, k) => { if (b) { ok.push(b); okTeks.push(perTurn[i].texts[k]); } });
       const d = document.createElement("div"); d.className = "seg";
       if (!ok.length) {
         d.innerHTML = `<div class="txt" style="color:var(--danger)">Speaker ${speaker}: gagal dibuat.</div>`;
         segs.appendChild(d); continue;
       }
-      const { blob } = await mergeAudio(ok, "wav");
-      semua.push(blob);
+      const { blob } = await mergeAudio(ok, okTeks);
+      semua.push(blob); semuaTeks.push(text);
       d.innerHTML = `<div class="who">Speaker ${speaker}</div><div class="txt">${text.replace(/</g, "&lt;")}</div>` +
                     `<audio controls src="${URL.createObjectURL(blob)}"></audio>`;
       segs.appendChild(d);
     }
     if (!semua.length) throw new Error("Tidak ada audio yang berhasil dibuat.");
 
-    const full = await mergeAudio(semua, "wav");
+    const full = await mergeAudio(semua, semuaTeks);
     out.innerHTML = `<label class="field">Hasil</label>` + doneCard(doneLabel);
     out.appendChild(audioBlockFromBlob(full.blob, `voicepromax-${prefix}.wav`));
     const lbl = document.createElement("label");
@@ -1277,10 +1410,11 @@ $("batch-go").addEventListener("click", async () => {
   const v = resolveVoice($("batch-voice").value);
   for (let i = 0; i < lines.length; i++) {
     try {
-      const blob = await speechChunk(lines[i], { response_format: fmt(), ...v });
+      const raw = await speechChunk(lines[i], { response_format: "wav", ...v });
+      const { blob } = await mergeAudio([raw], [lines[i]]);
       const d = document.createElement("div"); d.className = "seg";
       d.innerHTML = `<div class="txt">${(i + 1) + ". " + lines[i].slice(0, 80).replace(/</g,"&lt;")}</div>`;
-      d.appendChild(audioBlockFromBlob(blob, `voicepromax-batch-${i + 1}.${fmt()}`));
+      d.appendChild(audioBlockFromBlob(blob, `voicepromax-batch-${i + 1}.wav`));
       out.appendChild(d);
     } catch (e) {
       const d = document.createElement("div"); d.className = "seg";
