@@ -154,26 +154,117 @@ export function presetAsRef(name) {
   return { ref_audio: dataUri, ref_text: refText };
 }
 
+// ---------- pengaman rate limit (429) ----------
+// Status yang layak dicoba ulang. 429 = terlalu banyak permintaan,
+// 5xx = gangguan sementara di sisi Boson. Sisanya (400/401/413) permanen:
+// mengulang hanya memperparah antrean.
+const STATUS_ULANG = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+const MAX_ULANG = Math.max(0, Number(process.env.BOSON_MAX_RETRY ?? 4));
+const JEDA_AWAL_MS = Math.max(200, Number(process.env.BOSON_RETRY_BASE_MS ?? 900));
+const JEDA_MAKS_MS = Math.max(1000, Number(process.env.BOSON_RETRY_MAX_MS ?? 12000));
+// Fungsi Vercel dibatasi 60 detik (vercel.json). Sisakan ruang untuk generasi itu
+// sendiri, jadi total waktu menunggu tidak boleh mendekati batas tersebut.
+const ANGGARAN_ULANG_MS = Math.max(2000, Number(process.env.BOSON_RETRY_BUDGET_MS ?? 40000));
+
+const tidur = (ms) => new Promise((r) => setTimeout(r, ms));
+// Jitter penuh: acak 70%–130% supaya banyak permintaan tidak bangun serentak
+// lalu menabrak rate limit lagi bersamaan ("thundering herd").
+const jitter = (ms) => Math.round(ms * (0.7 + Math.random() * 0.6));
+
+// Header Retry-After boleh berisi detik ("12") atau tanggal HTTP.
+export function parseRetryAfter(nilai) {
+  if (!nilai) return null;
+  const detik = Number(String(nilai).trim());
+  if (Number.isFinite(detik)) return Math.max(0, detik);
+  const tgl = Date.parse(nilai);
+  if (Number.isFinite(tgl)) return Math.max(0, (tgl - Date.now()) / 1000);
+  return null;
+}
+
+function galat(pesan, status, extra = {}) {
+  return Object.assign(new Error(pesan), { status, ...extra });
+}
+
 // ---------- panggil Boson ----------
 export async function synth({ input, voice, preset, ref_audio, ref_text, response_format }) {
   const payload = { model: MODEL, input, response_format: response_format || "mp3" };
   if (ref_audio) { payload.ref_audio = ref_audio; if (ref_text) payload.ref_text = ref_text; }
   else if (preset) {
     const ref = presetAsRef(preset);
-    if (!ref) throw Object.assign(new Error(`Preset "${preset}" tidak ditemukan.`), { status: 400 });
+    if (!ref) throw galat(`Preset "${preset}" tidak ditemukan.`, 400);
     payload.ref_audio = ref.ref_audio; if (ref.ref_text) payload.ref_text = ref.ref_text;
   } else if (voice && voice !== "default") payload.voice = voice;
 
-  const r = await fetch(BOSON_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!r.ok) {
-    const detail = (await r.text()).slice(0, 500);
-    throw Object.assign(new Error(`Boson AI menolak (HTTP ${r.status}).`), { status: r.status, detail });
+  const body = JSON.stringify(payload);
+  const mulai = Date.now();
+  let terakhir = null;
+
+  for (let coba = 0; coba <= MAX_ULANG; coba++) {
+    let r = null, galatJaringan = null;
+    try {
+      r = await fetch(BOSON_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
+        body,
+      });
+    } catch (e) {
+      galatJaringan = e;                       // koneksi putus / timeout soket
+    }
+
+    if (r && r.ok) {
+      const mime = r.headers.get("content-type") || "audio/mpeg";
+      const buf = Buffer.from(await r.arrayBuffer());
+      return { mime, buf };
+    }
+
+    let status = 502, detail = "", retryAfter = null;
+    if (r) {
+      status = r.status;
+      detail = (await r.text().catch(() => "")).slice(0, 500);
+      retryAfter = parseRetryAfter(r.headers.get("retry-after"));
+    } else {
+      detail = String(galatJaringan?.message || galatJaringan || "gagal menghubungi Boson AI");
+    }
+
+    const pesan = status === 429
+      ? "Boson AI sedang membatasi jumlah permintaan (HTTP 429)."
+      : `Boson AI menolak (HTTP ${status}).`;
+    terakhir = galat(pesan, status, { detail, retryAfter });
+
+    // Permanen atau kesempatan habis -> lempar apa adanya.
+    if (!STATUS_ULANG.has(status) || coba === MAX_ULANG) throw terakhir;
+
+    // Backoff eksponensial: 0,9s -> 1,8s -> 3,6s -> 7,2s (dibatasi JEDA_MAKS_MS).
+    // Kalau server memberi Retry-After, itu yang dipakai — server paling tahu.
+    const eksponensial = jitter(JEDA_AWAL_MS * Math.pow(2, coba));
+    let tunggu = Math.min(retryAfter != null ? retryAfter * 1000 : eksponensial, JEDA_MAKS_MS);
+
+    // Jangan menunggu sampai fungsi serverless kehabisan waktu; lebih baik
+    // menyerah rapi dan biarkan klien yang menjadwalkan ulang.
+    if (Date.now() - mulai + tunggu > ANGGARAN_ULANG_MS) {
+      terakhir.retryAfter = Math.max(1, Math.ceil(tunggu / 1000));
+      throw terakhir;
+    }
+    await tidur(tunggu);
   }
-  const mime = r.headers.get("content-type") || "audio/mpeg";
-  const buf = Buffer.from(await r.arrayBuffer());
-  return { mime, buf };
+  throw terakhir || galat("Gagal memanggil Boson AI.", 502);
+}
+
+// ---------- pembatas laju per pengguna (opsional, butuh KV) ----------
+// Aktif hanya kalau RATE_LIMIT_PER_MIN > 0 dan KV terkonfigurasi. Gunanya menahan
+// satu pengguna agar tidak menghabiskan kuota Boson untuk semua orang.
+const LIMIT_PER_MIN = Math.max(0, Number(process.env.RATE_LIMIT_PER_MIN || 0));
+export async function cekLaju(kunci) {
+  if (!LIMIT_PER_MIN || !kvReady || !kunci) return { ok: true };
+  const jendela = Math.floor(Date.now() / 60000);
+  const k = `rl:${String(kunci).trim().toLowerCase()}:${jendela}`;
+  try {
+    const n = Number(await kv(["incr", k]));
+    if (n === 1) await kv(["expire", k, "70"]);
+    if (n > LIMIT_PER_MIN) {
+      const sisa = 60 - Math.floor((Date.now() % 60000) / 1000);
+      return { ok: false, retryAfter: Math.max(1, sisa), limit: LIMIT_PER_MIN };
+    }
+  } catch { return { ok: true }; }   // KV bermasalah -> jangan halangi pengguna
+  return { ok: true };
 }
