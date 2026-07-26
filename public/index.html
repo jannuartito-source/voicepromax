@@ -188,6 +188,9 @@
     <div class="toolbar">
       <label>Format keluaran</label>
       <select id="fmt"><option value="mp3">mp3</option><option value="wav">wav</option></select>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer" title="Buang letupan/derau sebelum kata pertama. Matikan kalau ucapan terdengar terpotong.">
+        <input type="checkbox" id="tidy" /> Rapikan otomatis
+      </label>
       <span class="hint" id="cfgHint"></span>
       <span style="flex:1"></span>
       <button class="ghost" id="removeAdsBtn" style="display:none;border-color:var(--sky);color:var(--sky-2)">✨ Hapus Iklan</button>
@@ -246,7 +249,7 @@
             <div class="grow">
               <label class="field">Audio referensi (unggah atau rekam, ≤30 detik)</label>
               <input type="file" id="clone-file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.webm,audio/*" />
-              <div class="hint">Paling bagus 10–20 detik bicara jelas, tanpa musik/noise. Dari file panjang, yang dipakai hanya ±15 detik pertama (setelah hening di awal dibuang).</div>
+              <div class="hint">Paling bagus 10–20 detik bicara jelas, tanpa musik/noise. File yang lebih panjang otomatis dipakai 20 detik pertamanya saja.</div>
             </div>
           </div>
           <audio id="file-preview" controls style="display:none;margin-top:8px"></audio>
@@ -263,7 +266,7 @@
           </div>
           <label class="field" style="margin-top:12px">Transkrip audio referensi (sangat disarankan)</label>
           <textarea id="clone-reftext" rows="2" placeholder="Kalimat persis yang diucapkan di audio referensi..."></textarea>
-          <div class="hint">Tulis persis kalimat di audio referensi. Kalau dikosongkan, model kadang "melanjutkan" audio referensi dan memunculkan bunyi asing sebelum kata pertama.</div>
+          <div class="hint">Isi hanya kalau audio referensi Anda pendek (≤20 detik) dan ini transkrip persisnya. Audio yang lebih panjang otomatis dipotong, dan transkripnya ikut diabaikan supaya model tidak mengarang.</div>
           <div class="row"><button class="go" id="clone-go">Kloning &amp; hasilkan</button></div>
           <div class="hint">⚠️ Hanya klon suara yang kamu punya haknya. Dilarang meniru suara orang tanpa izin.</div>
           <div class="status" id="clone-status"></div>
@@ -810,11 +813,10 @@ async function collectSpeakers(hostId) {
 // ================== GENERASI CEPAT (chunk + paralel) ==================
 // Teks panjang dipecah jadi potongan kecil, digenerate BERBARENGAN, lalu digabung
 // berurutan. Ini yang membuat audio panjang selesai jauh lebih cepat.
-// Potongan sengaja dibuat pendek: generasi panjang membuat model kehilangan
-// pegangan pada teks dan mulai "ngelantur". Sambungan sudah bersih, jadi
-// lebih banyak potongan pendek TIDAK lagi berarti lebih banyak noise.
-const CHUNK_MAX = 320;   // ± karakter per potongan
-const CHUNK_MIN = 60;    // di bawah ini digabung ke tetangga (masih dalam paragraf yang sama)
+// Setelan pabrik, sama dengan _chunk(max_chars=120) di higgs_engine/app.py:
+// paragraf dipisah baris kosong, paragraf panjang dipecah per kalimat.
+const CHUNK_MAX = 120;   // ± karakter per potongan
+const CHUNK_MIN = 40;    // di bawah ini digabung ke tetangga (masih dalam paragraf yang sama)
 const CONCURRENCY = 3;   // berapa potongan digarap sekaligus (jaga2 rate limit Boson)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -864,12 +866,13 @@ function potongParagraf(para, maxLen) {
 function splitIntoChunks(text, maxLen = CHUNK_MAX) {
   const src = text || "";
   const out = [];
-  const paraRe = /[^\n]+/g;
-  let m;
-  while ((m = paraRe.exec(src)) !== null) {                 // paragraf = jeda alami, tidak digabung
-    if (!m[0].trim()) continue;
-    for (const [a, b] of potongParagraf(m[0], maxLen)) {
-      const potongan = src.slice(m.index + a, m.index + b).trim();
+  let pos = 0;
+  for (const para of src.split(/\n\s*\n/)) {              // paragraf dipisah baris kosong
+    const mulai = src.indexOf(para, pos);
+    pos = mulai + para.length;
+    if (!para.trim()) continue;
+    for (const [a, b] of potongParagraf(para, maxLen)) {
+      const potongan = src.slice(mulai + a, mulai + b).trim();
       if (potongan) out.push(potongan);
     }
   }
@@ -946,29 +949,27 @@ async function speechChunk(input, voiceBody, tries = 3) {
   // Terlalu panjang  = model "ngelantur" (runaway).
   // Terlalu pendek   = hasil TERPOTONG (kata tidak selesai diucapkan)  <-- ini yang dulu lolos.
   const teks = normalizeForTTS(input);            // "Lynk.id" -> "Lynk dot id"
-  const expect = teks.length * 0.062;             // ± 16 karakter per detik
-  const longgar = /<\|/.test(teks) ? 1.8 : 1;     // teks bertag jeda boleh lebih panjang
-  const maxSec = (expect * 1.4 + 2.5) * longgar;  // lebih panjang dari ini = ngelantur
-  const minSec = Math.max(0.5, expect * 0.55);    // lebih pendek dari ini = terpotong
-  let best = null, bestScore = Infinity;
+  // Rumus anti-ngelantur asli dari higgs_engine.py: limit_sec = 0.13 * panjang + 3.
+  // HANYA batas atas. Batas bawah sengaja tidak ada — menolak hasil "terlalu pendek"
+  // justru membuat sistem memilih take yang lebih buruk.
+  const maxSec = 0.13 * Math.max(teks.length, 1) + 3.0;
+  let terakhir = null;
   for (let a = 1; a <= tries; a++) {
     let blob;
     try {
-      blob = await postJSON("/api/speech", { input: teks, ...voiceBody }, true);
+      const { refTrimmed, ...kirim } = voiceBody;   // penanda internal, jangan dikirim
+      blob = await postJSON("/api/speech", { input: teks, ...kirim }, true);
     } catch (e) {
-      if (a === tries) { if (best) return best; throw e; }
+      if (a === tries) { if (terakhir) return terakhir; throw e; }
       await sleep(700 * a);                      // gagal jaringan -> tunggu & ulang
       continue;
     }
+    terakhir = blob;
     const dur = await measureDuration(blob);
-    if (!dur) return blob;                       // tak terukur -> pakai apa adanya
-    if (dur >= minSec && dur <= maxSec) return blob;
-    // simpan kandidat terbaik; hasil terpotong dihukum 3x lebih berat daripada kepanjangan
-    const score = dur < minSec ? (minSec - dur) * 3 : (dur - maxSec);
-    if (score < bestScore) { best = blob; bestScore = score; }
-    if (a < tries) await sleep(300);
+    if (!dur || dur <= maxSec) return blob;      // wajar (atau tak terukur) -> pakai
+    if (a < tries) await sleep(300);             // ngelantur -> ulangi
   }
-  return best;
+  return terakhir;                               // semua ngelantur -> pakai percobaan terakhir
 }
 
 // gabung beberapa WAV jadi satu (byte-level, hemat memori) — untuk teks panjang
@@ -998,11 +999,10 @@ async function concatWav(blobs) {
 }
 // SELALU lewat PCM (decode -> bersihkan -> sambung -> encode WAV),
 // termasuk saat potongannya cuma satu — supaya derau di awal kata ikut dibuang.
-async function mergeAudio(blobs, texts) {
-  const keep = [], keepTexts = [];
-  (blobs || []).forEach((b, i) => { if (b) { keep.push(b); keepTexts.push(texts?.[i] || ""); } });
+async function mergeAudio(blobs) {
+  const keep = (blobs || []).filter(Boolean);
   if (!keep.length) throw new Error("Tidak ada audio yang berhasil dibuat.");
-  try { return { blob: await joinPcmPad(keep, keepTexts), ext: "wav" }; }
+  try { return { blob: await joinPcmPad(keep), ext: "wav" }; }
   catch {
     // cadangan kalau Web Audio tidak tersedia / gagal mendekode
     if (keep.length === 1) return { blob: keep[0], ext: "wav" };
@@ -1030,7 +1030,7 @@ $("tts-go").addEventListener("click", async () => {
       (done, tot) => prog.set(4 + (done / tot) * 90)
     );
     prog.set(96, "Merapikan & menggabungkan…");
-    const { blob } = await mergeAudio(blobs, chunks);
+    const { blob } = await mergeAudio(blobs);
     const hasil = await finalize(blob, "voicepromax-tts", prog);
     const out = $("tts-out");
     out.innerHTML = `<label class="field">Hasil</label>` + doneCard("Suara Sudah Jadi");
@@ -1054,7 +1054,7 @@ $("expr-go").addEventListener("click", async () => {
     prog.set(35);
     const raw = await speechChunk(text, body);
     prog.set(90, "Merapikan…");
-    const { blob } = await mergeAudio([raw], [text]);
+    const { blob } = await mergeAudio([raw]);
     const hasil = await finalize(blob, "voicepromax-ekspresi", prog);
     const out = $("expr-out");
     out.innerHTML = doneCard("Suara Sudah Jadi");
@@ -1093,181 +1093,149 @@ function encodeWav(samples, sampleRate) {
   return new Blob([view], { type: "audio/wav" });
 }
 
-// ---- pembersihan audio per potongan ----
-// Model TTS sering menyisipkan transien/derau pendek TEPAT SEBELUM kata pertama
-// (sisa "pemanasan" dari audio referensi). Bagian ini yang membuangnya.
+// ================== PENGGABUNGAN AUDIO — SETELAN PABRIK ==================
+// Mengikuti _concat() dari Higgs Audio Studio (higgs_engine.py):
+//   ratakan kekerasan tiap potongan -> sisipkan hening 0,3 detik -> batasi puncak -1 dBFS.
+// TIDAK ada pemangkasan hening, deteksi awal kata, atau tapis frekuensi:
+// pemangkasan itulah yang membuat kalimat terdengar tercekat dan tidak mengalir.
+const GAP_SEC = 0.30;                    // = _concat(gap=0.3)
+const TARGET_RMS = Math.pow(10, -20 / 20);  // -20 dBFS, patokan bicara
+const MAX_GAIN = Math.pow(10, 20 / 20);     // jangan dorong lebih dari +20 dB
+const PEAK_CEIL = Math.pow(10, -1 / 20);    // -1 dBFS
 
-// Buang DC offset. Beda DC antar potongan = "tik" keras waktu disambung.
 function removeDC(buf) {
   let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i];
   const dc = sum / (buf.length || 1);
   if (Math.abs(dc) > 1e-6) for (let i = 0; i < buf.length; i++) buf[i] -= dc;
   return buf;
 }
-// Tapis lolos-tinggi 70 Hz: membuang dengung/gemuruh rendah yang terdengar
-// sebagai "noise" walau tidak ada suara.
-function highPass(buf, sr, fc = 70) {
-  const rc = 1 / (2 * Math.PI * fc), dt = 1 / sr, a = rc / (rc + dt);
-  let yPrev = 0, xPrev = buf[0] || 0;
-  for (let i = 0; i < buf.length; i++) {
-    const x = buf[i];
-    const y = a * (yPrev + x - xPrev);
-    buf[i] = y; xPrev = x; yPrev = y;
-  }
+// Fade 5 ms: cukup untuk mencegah "tik" di sambungan, terlalu singkat untuk terdengar.
+function edgeFade(buf, sr) {
+  const n = Math.min(Math.round(sr * 0.005), Math.floor(buf.length / 2));
+  for (let i = 0; i < n; i++) { const g = i / n; buf[i] *= g; buf[buf.length - 1 - i] *= g; }
   return buf;
 }
-function fadeIn(buf, n) { const m = Math.min(n, buf.length); for (let i = 0; i < m; i++) buf[i] *= i / m; return buf; }
-function fadeOut(buf, n) { const m = Math.min(n, buf.length); for (let i = 0; i < m; i++) buf[buf.length - 1 - i] *= i / m; return buf; }
-function applyFade(buf, n) { fadeIn(buf, n); fadeOut(buf, n); return buf; }
-function rmsOf(buf) {
-  let s = 0, n = 0; const step = Math.max(1, Math.floor(buf.length / 20000));
-  for (let i = 0; i < buf.length; i += step) { s += buf[i] * buf[i]; n++; }
-  return Math.sqrt(s / (n || 1));
+// RMS yang mengabaikan blok hening (pengganti sederhana meteran LUFS),
+// supaya potongan yang banyak diamnya tidak ikut didorong kekerasannya.
+function gatedRms(x, sr) {
+  const win = Math.max(1, Math.round(sr * 0.05));
+  const blok = [];
+  for (let o = 0; o + win <= x.length; o += win) {
+    let s = 0; for (let i = 0; i < win; i++) { const v = x[o + i]; s += v * v; }
+    blok.push(Math.sqrt(s / win));
+  }
+  if (!blok.length) { let s = 0; for (let i = 0; i < x.length; i++) s += x[i] * x[i]; return Math.sqrt(s / (x.length || 1)); }
+  let peak = 0; for (const v of blok) if (v > peak) peak = v;
+  const gate = peak * 0.1;
+  const aktif = blok.filter((v) => v >= gate);
+  const pakai = aktif.length ? aktif : blok;
+  let s = 0; for (const v of pakai) s += v * v;
+  return Math.sqrt(s / pakai.length);
+}
+// = _loudness_normalize(): dorong ke -20 dBFS, maksimal +20 dB.
+function loudnessNormalize(x, sr) {
+  const r = gatedRms(x, sr);
+  if (r < 1e-6) return x;
+  const gain = Math.min(TARGET_RMS / r, MAX_GAIN);
+  if (Math.abs(gain - 1) > 0.01) for (let i = 0; i < x.length; i++) x[i] *= gain;
+  return x;
+}
+function peakLimit(x, ceil = PEAK_CEIL) {
+  let peak = 0; for (let i = 0; i < x.length; i++) { const v = Math.abs(x[i]); if (v > peak) peak = v; }
+  if (peak > ceil && peak > 0) { const g = ceil / peak; for (let i = 0; i < x.length; i++) x[i] *= g; }
+  return x;
 }
 
-// Cari batas SUARA ASLI memakai amplop energi 10 ms.
-// AWAL ditangani tegas (di situlah letupan/derau muncul);
-// AKHIR ditangani hati-hati supaya kata terakhir tidak ikut terpangkas.
-function speechBounds(buf, sr) {
+// ---- pembersihan opsional (kotak centang "Rapikan otomatis") ----
+// Hanya dipakai kalau user menyalakannya: membuang letupan/derau sebelum kata pertama.
+// Mati secara bawaan karena bisa membuat ucapan terdengar terpotong.
+function speechStart(buf, sr) {
   const win = Math.max(1, Math.round(sr * 0.010));
   const nF = Math.floor(buf.length / win);
-  if (nF < 5) return { start: 0, end: buf.length - 1 };
+  if (nF < 8) return 0;
   const env = new Float32Array(nF);
   for (let f = 0; f < nF; f++) {
     let s = 0; const o = f * win;
     for (let i = 0; i < win; i++) { const v = buf[o + i]; s += v * v; }
     env[f] = Math.sqrt(s / win);
   }
-  const sorted = Array.from(env).sort((a, b) => a - b);
-  const floor = sorted[Math.floor(nF * 0.15)] || 0;    // lantai derau potongan ini
-  const peak = sorted[nF - 1] || 0;
-  if (peak < 2e-4) return null;                        // isinya hening semua
-
-  // --- AWAL: cari 70 ms suara yang benar-benar mantap, lalu rangkul mundur ---
-  const hi = Math.max(floor * 5, peak * 0.08, 0.005);
-  const lo = Math.max(floor * 2, hi * 0.30);
+  const urut = Array.from(env).sort((a, b) => a - b);
+  const floor = urut[Math.floor(nF * 0.15)] || 0, peak = urut[nF - 1] || 0;
+  if (peak < 2e-4) return 0;
+  const hi = Math.max(floor * 5, peak * 0.08, 0.005), lo = Math.max(floor * 2, hi * 0.3);
   let a = -1, run = 0;
-  for (let f = 0; f < nF; f++) {
-    if (env[f] >= hi) { if (++run >= 7) { a = f - 6; break; } } else run = 0;
-  }
-  if (a < 0) for (let f = 0; f < nF; f++) if (env[f] >= hi) { a = f; break; }
-  if (a < 0) return null;
+  for (let f = 0; f < nF; f++) { if (env[f] >= hi) { if (++run >= 7) { a = f - 6; break; } } else run = 0; }
+  if (a < 0) return 0;
   let back = 0;
-  while (a > 0 && env[a - 1] >= lo && back++ < 40) a--;  // konsonan lembut, maks 400 ms
-
-  // --- AKHIR: cukup mundur dari ujung selama benar-benar sunyi ---
-  const loAkhir = Math.max(floor * 2, peak * 0.015);
-  let b = nF - 1;
-  while (b > a && env[b] < loAkhir) b--;
-
-  if (b <= a) return null;
-  return { start: a * win, end: Math.min(buf.length - 1, (b + 1) * win - 1) };
+  while (a > 0 && env[a - 1] >= lo && back++ < 40) a--;
+  return Math.max(0, a * win - Math.round(sr * 0.06));   // sisakan 60 ms sebelum suara
 }
 
-// Bersihkan satu potongan: DC -> lolos-tinggi -> potong tepat di batas suara -> fade.
-// Mengembalikan null kalau potongan ternyata cuma derau (dibuang, tidak ikut digabung).
-function cleanChunk(buf, sr) {
-  removeDC(buf);
-  highPass(buf, sr, 70);
-  const b = speechBounds(buf, sr);
-  if (!b) return null;
-  const lead = Math.round(sr * 0.020);                 // sisakan 20 ms sebelum suara
-  const tail = Math.round(sr * 0.080);
-  const s = Math.max(0, b.start - lead);
-  const e = Math.min(buf.length - 1, b.end + tail);
-  const out = new Float32Array(e - s + 1);
-  out.set(buf.subarray(s, e + 1));
-  // fade-in 20 ms: sisa transien apa pun di 20 ms pertama jadi tidak terdengar
-  fadeIn(out, Math.min(Math.round(sr * 0.020), Math.floor(out.length / 2)));
-  fadeOut(out, Math.min(Math.round(sr * 0.015), Math.floor(out.length / 2)));
-  return out;
-}
-
-// Jeda setelah sebuah potongan, mengikuti tanda baca -> terdengar lebih natural.
-function gapFor(text) {
-  const t = (text || "").trim();
-  if (/[.!?…]["'”’)\]]*$/.test(t)) return 170;
-  if (/[,;:]$/.test(t)) return 90;
-  return 70;
-}
-
-// Gabungkan (atau bersihkan satu) audio jadi WAV yang mulus.
-// Dipakai JUGA saat potongannya cuma satu, supaya derau di awal tetap dibuang.
-async function joinPcmPad(blobs, texts) {
+async function decodeMono(blobs) {
   const AC = window.AudioContext || window.webkitAudioContext;
   const ctx = new AC();
   let sr = 24000;
-  let parts = [], keptTexts = [];
+  const parts = [];
   try {
-    for (let k = 0; k < blobs.length; k++) {
-      const dec = await ctx.decodeAudioData(await blobs[k].arrayBuffer());
+    for (const b of blobs) {
+      const dec = await ctx.decodeAudioData(await b.arrayBuffer());
       sr = dec.sampleRate;
-      const len = dec.length, mono = new Float32Array(len);
+      const mono = new Float32Array(dec.length);
       for (let c = 0; c < dec.numberOfChannels; c++) {
         const d = dec.getChannelData(c);
-        for (let i = 0; i < len; i++) mono[i] += d[i] / dec.numberOfChannels;
+        for (let i = 0; i < dec.length; i++) mono[i] += d[i] / dec.numberOfChannels;
       }
-      const cleaned = cleanChunk(mono, sr);
-      if (cleaned && cleaned.length > sr * 0.03) { parts.push(cleaned); keptTexts.push(texts?.[k] || ""); }
+      parts.push(mono);
     }
   } finally { if (ctx.close) ctx.close(); }
-  if (!parts.length) throw new Error("Audio kosong setelah dibersihkan.");
-
-  // samakan kekerasan suara antar potongan (maks ±3 dB) supaya tidak naik-turun
-  const rms = parts.map(rmsOf).filter((v) => v > 1e-6).sort((x, y) => x - y);
-  const ref = rms.length ? rms[Math.floor(rms.length / 2)] : 0;
-  if (ref > 1e-6) {
-    parts = parts.map((p) => {
-      const r = rmsOf(p); if (r < 1e-6) return p;
-      const g = Math.max(0.71, Math.min(1.41, ref / r));
-      if (Math.abs(g - 1) < 0.02) return p;
-      const q = new Float32Array(p.length);
-      for (let i = 0; i < p.length; i++) q[i] = p[i] * g;
-      return q;
-    });
-  }
-
-  const lead = Math.round(sr * 0.040);                 // 40 ms hening bersih di awal
-  const gaps = parts.map((_, i) => (i < parts.length - 1 ? Math.round((sr * gapFor(keptTexts[i])) / 1000) : 0));
-  let total = lead + Math.round(sr * 0.06);
-  parts.forEach((p, i) => { total += p.length + gaps[i]; });
-
-  const out = new Float32Array(total);
-  let o = lead;
-  parts.forEach((p, i) => { out.set(p, o); o += p.length + gaps[i]; });
-
-  let peak = 0; for (let i = 0; i < out.length; i++) { const v = Math.abs(out[i]); if (v > peak) peak = v; }
-  if (peak > 0.99) { const g = 0.99 / peak; for (let i = 0; i < out.length; i++) out[i] *= g; }
-  return encodeWav(out, sr);
+  return { parts, sr };
 }
-// Siapkan audio referensi: mono, 24 kHz (bukan 16 kHz lagi — referensi 16 kHz
-// membuat hasil kloning terdengar tumpul & berdesis), hening di depan dibuang,
-// lalu volumenya dinormalkan. Tetap kecil (± 1 MB) supaya aman dari batas Vercel.
-async function toWavDataURL(src, targetSR = 24000, maxSec = 15) {
+
+async function joinPcmPad(blobs) {
+  const { parts, sr } = await decodeMono(blobs);
+  const rapikan = $("tidy") && $("tidy").checked;
+  let siap = parts.map((p) => {
+    let x = p;
+    if (rapikan) { const s = speechStart(x, sr); if (s > 0) x = x.subarray(s); }
+    removeDC(x); edgeFade(x, sr);
+    return x;
+  }).filter((p) => p.length > sr * 0.02);
+  if (!siap.length) throw new Error("Audio kosong.");
+
+  // Satu potongan: biarkan apa adanya, persis seperti eng.generate() di versi Python.
+  if (siap.length === 1) return encodeWav(peakLimit(siap[0]), sr);
+
+  siap.forEach((p) => loudnessNormalize(p, sr));
+  const gap = Math.round(sr * GAP_SEC);
+  let total = 0;
+  siap.forEach((p, i) => { total += p.length + (i ? gap : 0); });
+  const out = new Float32Array(total);
+  let o = 0;
+  siap.forEach((p, i) => { if (i) o += gap; out.set(p, o); o += p.length; });
+  return encodeWav(peakLimit(out), sr);
+}
+// Siapkan audio referensi — setelan pabrik (= _ref_codes di higgs_engine.py):
+// mono, dipotong ke REF_MAX_SEC detik pertama, TANPA dibersihkan apa pun.
+// Mengembalikan { dataUrl, trimmed }: kalau audio dipotong, transkrip WAJIB
+// dibuang karena transkrip mengacu ke audio penuh dan tidak lagi cocok
+// (ini persis alasan `ref_text = None` di baris 328 higgs_engine.py).
+const REF_MAX_SEC = 20;
+async function toWavDataURL(src, targetSR = 24000, maxSec = REF_MAX_SEC) {
   const ab = await src.arrayBuffer();
   const AC = window.AudioContext || window.webkitAudioContext;
   const tmp = new AC();
   const decoded = await tmp.decodeAudioData(ab);
   if (tmp.close) tmp.close();
 
-  // mixdown ke mono dulu (seluruh durasi, pemotongan dilakukan setelah trim hening)
-  const full = new Float32Array(decoded.length);
+  const cap = Math.floor(decoded.sampleRate * maxSec);
+  const trimmed = decoded.length > cap;
+  const srcLen = Math.min(decoded.length, cap);
+  const monoIn = new Float32Array(srcLen);
   for (let c = 0; c < decoded.numberOfChannels; c++) {
     const d = decoded.getChannelData(c);
-    for (let i = 0; i < decoded.length; i++) full[i] += d[i] / decoded.numberOfChannels;
+    for (let i = 0; i < srcLen; i++) monoIn[i] += d[i] / decoded.numberOfChannels;
   }
-  // Bersihkan referensi persis seperti hasil: DC, dengung rendah, dan
-  // hening/derau/napas di awal dibuang. Referensi kotor = hasil kloning kotor.
-  removeDC(full);
-  highPass(full, decoded.sampleRate, 70);
-  const b = speechBounds(full, decoded.sampleRate);
-  const from = b ? Math.max(0, b.start - Math.round(decoded.sampleRate * 0.02)) : 0;
-  const until = b ? Math.min(full.length, b.end + 1) : full.length;
-  const trimmed = full.subarray(from, until);
-  const srcLen = Math.min(trimmed.length, Math.floor(decoded.sampleRate * maxSec));
-  const monoIn = trimmed.subarray(0, srcLen);
 
-  // resample ke targetSR pakai OfflineAudioContext
   const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   const outLen = Math.max(1, Math.ceil((srcLen / decoded.sampleRate) * targetSR));
   const off = new OAC(1, outLen, targetSR);
@@ -1276,13 +1244,7 @@ async function toWavDataURL(src, targetSR = 24000, maxSec = 15) {
   const node = off.createBufferSource();
   node.buffer = inBuf; node.connect(off.destination); node.start();
   const rendered = await off.startRendering();
-
-  // normalkan puncak ke 0.95 supaya referensi tidak terlalu pelan/keras
-  const out = rendered.getChannelData(0);
-  let peak = 0; for (let i = 0; i < out.length; i++) { const v = Math.abs(out[i]); if (v > peak) peak = v; }
-  if (peak > 1e-4) { const g = 0.95 / peak; for (let i = 0; i < out.length; i++) out[i] *= g; }
-  applyFade(out, Math.floor(targetSR * 0.005));
-  return blobToDataURL(encodeWav(out, targetSR));
+  return { dataUrl: await blobToDataURL(encodeWav(rendered.getChannelData(0), targetSR)), trimmed };
 }
 
 // --- Rekam dari mikrofon (dipakai tab Kloning, Podcast, & Buku Audio) ---
@@ -1358,10 +1320,13 @@ async function ownVoiceRef(key, ids) {
   if (!src) return null;
   if (!OWN_CACHE[key]) {
     try { OWN_CACHE[key] = await toWavDataURL(src); }
-    catch { OWN_CACHE[key] = await blobToDataURL(src); }
+    catch { OWN_CACHE[key] = { dataUrl: await blobToDataURL(src), trimmed: false }; }
   }
+  const { dataUrl, trimmed } = OWN_CACHE[key];
   const ref_text = (ids.reftext && $(ids.reftext) ? $(ids.reftext).value : "").trim();
-  return { ref_audio: OWN_CACHE[key], ...(ref_text ? { ref_text } : {}) };
+  // Audio dipotong ke REF_MAX_SEC detik pertama -> transkrip tidak lagi cocok.
+  // Mengirimkannya justru membuat model mengarang di awal kalimat.
+  return { ref_audio: dataUrl, ...(ref_text && !trimmed ? { ref_text } : {}), refTrimmed: trimmed };
 }
 
 const CLONE_IDS = { btn: "rec-btn", status: "rec-status", preview: "rec-preview",
@@ -1394,7 +1359,7 @@ $("clone-go").addEventListener("click", async () => {
       (done, tot) => prog.set(6 + (done / tot) * 88)
     );
     prog.set(96, "Merapikan & menggabungkan…");
-    const { blob } = await mergeAudio(blobs, chunks);
+    const { blob } = await mergeAudio(blobs);
     const hasil = await finalize(blob, "voicepromax-kloning", prog);
     const out = $("clone-out");
     out.innerHTML = `<label class="field">Hasil</label>` + doneCard("Kloning Sudah Jadi");
@@ -1465,7 +1430,7 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix, doneLabe
         d.innerHTML = `<div class="txt" style="color:var(--danger)">Speaker ${speaker}: gagal dibuat.</div>`;
         segs.appendChild(d); continue;
       }
-      const { blob } = await mergeAudio(ok, okTeks);
+      const { blob } = await mergeAudio(ok);
       semua.push(blob); semuaTeks.push(text);
       d.innerHTML = `<div class="who">Speaker ${speaker}</div><div class="txt">${text.replace(/</g, "&lt;")}</div>` +
                     `<audio controls src="${URL.createObjectURL(blob)}"></audio>`;
@@ -1473,7 +1438,7 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix, doneLabe
     }
     if (!semua.length) throw new Error("Tidak ada audio yang berhasil dibuat.");
 
-    const full = await mergeAudio(semua, semuaTeks);
+    const full = await mergeAudio(semua);
     const hasil = await finalize(full.blob, `voicepromax-${prefix}`, prog);
     out.innerHTML = `<label class="field">Hasil</label>` + doneCard(doneLabel);
     out.appendChild(audioBlockFromBlob(hasil.blob, hasil.name));
@@ -1502,7 +1467,7 @@ $("batch-go").addEventListener("click", async () => {
   for (let i = 0; i < lines.length; i++) {
     try {
       const raw = await speechChunk(lines[i], { response_format: "wav", ...v });
-      const { blob } = await mergeAudio([raw], [lines[i]]);
+      const { blob } = await mergeAudio([raw]);
       const hasil = await finalize(blob, `voicepromax-batch-${i + 1}`);
       const d = document.createElement("div"); d.className = "seg";
       d.innerHTML = `<div class="txt">${(i + 1) + ". " + lines[i].slice(0, 80).replace(/</g,"&lt;")}</div>`;
