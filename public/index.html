@@ -98,6 +98,27 @@
   .login h3 { margin: 0 0 14px; }
   .login input { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
     border-radius: 9px; padding: 11px; font-size: 15px; font-family: inherit; margin-bottom: 12px; }
+
+  /* progress bar "Suara sedang dibuat" */
+  .prog { margin-top: 2px; }
+  .prog .lbl { display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 13px; color: var(--muted); margin-bottom: 7px; }
+  .prog .lbl b { color: var(--sky-2); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .prog .bar { height: 8px; border-radius: 99px; background: var(--panel-2);
+    border: 1px solid var(--line); overflow: hidden; }
+  .prog .fill { height: 100%; border-radius: 99px;
+    background: linear-gradient(90deg, var(--sky-d), var(--sky-2));
+    transition: width .28s cubic-bezier(.4,0,.2,1); }
+
+  /* banner hasil selesai */
+  .done { display: flex; align-items: center; gap: 8px; margin: 2px 0 12px;
+    font-size: 15px; font-weight: 700; color: var(--ok); }
+
+  /* blok suara sendiri di podcast / buku audio */
+  .ownvoice { margin-top: 4px; padding: 10px 12px 12px; border-radius: 9px;
+    background: rgba(255,255,255,.03); border: 1px dashed var(--line); }
+  .ownvoice input[type=file] { width: 100%; }
+  .spk select { width: 100%; }
 </style>
 </head>
 <body>
@@ -225,6 +246,7 @@
             <div class="grow">
               <label class="field">Audio referensi (unggah atau rekam, ≤30 detik)</label>
               <input type="file" id="clone-file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.webm,audio/*" />
+              <div class="hint">Paling bagus 10–20 detik bicara jelas, tanpa musik/noise. Dari file panjang, yang dipakai hanya ±15 detik pertama (setelah hening di awal dibuang).</div>
             </div>
           </div>
           <audio id="file-preview" controls style="display:none;margin-top:8px"></audio>
@@ -258,6 +280,7 @@ Speaker 1: Terima kasih, senang sekali bisa hadir di sini.
 Speaker 0: Jadi, apa topik kita kali ini?
 Speaker 1: Kita akan bahas masa depan AI suara.</textarea>
         <button class="ghost" data-ex="pod" style="margin-top:10px">Contoh</button>
+        <div class="hint" style="margin-top:14px">Tiap Speaker bisa memakai preset <b>atau</b> suara sendiri — pilih “🎙️ Suara sendiri” lalu unggah/rekam audionya.</div>
         <div id="pod-speakers"></div>
         <div class="row"><button class="go" id="pod-go">Hasilkan podcast</button></div>
         <div class="status" id="pod-status"></div>
@@ -273,6 +296,7 @@ Speaker 1: Kita akan bahas masa depan AI suara.</textarea>
 Speaker 1: Apakah ada orang di sini?
 Speaker 0: teriak Tom sambil menaiki tangga yang berderit. Yang menjawab hanyalah keheningan.</textarea>
         <button class="ghost" data-ex="book" style="margin-top:10px">Contoh</button>
+        <div class="hint" style="margin-top:14px">Narator (Speaker 0) maupun tokoh bisa memakai suara sendiri — pilih “🎙️ Suara sendiri” lalu unggah/rekam audionya.</div>
         <div id="book-speakers"></div>
         <div class="row"><button class="go" id="book-go">Hasilkan buku audio</button></div>
         <div class="status" id="book-status"></div>
@@ -607,23 +631,68 @@ function insertTag(tag) {
 }
 
 // ---- speaker blocks (podcast / book) ----
+// Tiap speaker bisa memakai preset ATAU suara sendiri (unggah file / rekam mikrofon).
+function speakerIds(hostId, i) {
+  const uid = `${hostId}-s${i}`;
+  return { uid, btn: `${uid}-rec`, status: `${uid}-recst`, preview: `${uid}-pv`,
+           file: `${uid}-file`, filePreview: `${uid}-pv`, reftext: `${uid}-ref` };
+}
 function buildSpeakers(hostId, n) {
   const host = $(hostId); host.innerHTML = "";
+  // bersihkan sisa rekaman speaker lama saat jumlah pembicara diubah
+  Object.keys(OWN_REC).forEach((k) => { if (k.startsWith(hostId + "-s")) { OWN_REC[k] = null; OWN_CACHE[k] = null; } });
+
   const sel = document.createElement("div"); sel.className = "row";
   sel.innerHTML = `<label class="field" style="margin:0">Jumlah pembicara</label>`;
   const num = document.createElement("select");
   [2, 3, 4].forEach((k) => (num.innerHTML += `<option value="${k}" ${k === n ? "selected" : ""}>${k}</option>`));
   num.addEventListener("change", () => buildSpeakers(hostId, parseInt(num.value)));
   sel.appendChild(num); host.appendChild(sel);
+
   for (let i = 0; i < n; i++) {
+    const ids = speakerIds(hostId, i);
     const b = document.createElement("div"); b.className = "spk";
-    b.innerHTML = `<h4>Speaker ${i}</h4><select data-spk="${i}">${voiceOptions()}</select>`;
+    b.innerHTML = `
+      <h4>Speaker ${i}</h4>
+      <select data-spk="${i}" id="${ids.uid}-sel">
+        <option value="own">🎙️ Suara sendiri (unggah / rekam)</option>
+        ${voiceOptions()}
+      </select>
+      <div class="ownvoice" id="${ids.uid}-own" style="display:none">
+        <label class="field" style="margin:0 0 8px">Audio suara Speaker ${i} (10–20 detik, jelas & tanpa musik)</label>
+        <input type="file" id="${ids.file}" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.opus,.webm,audio/*" />
+        <div class="row" style="margin-top:8px">
+          <button class="ghost" type="button" id="${ids.btn}">🎙️ Mulai rekam</button>
+          <span class="hint" id="${ids.status}" style="margin:0"></span>
+        </div>
+        <audio id="${ids.preview}" controls style="display:none;margin-top:8px"></audio>
+        <label class="field" style="margin:12px 0 8px">Transkrip audio (opsional, menaikkan kemiripan)</label>
+        <textarea id="${ids.reftext}" rows="2" placeholder="Kalimat persis yang diucapkan di audio…"></textarea>
+      </div>`;
     host.appendChild(b);
+
+    const selEl = $(`${ids.uid}-sel`), ownEl = $(`${ids.uid}-own`);
+    // default: preset berbeda tiap speaker supaya tidak terdengar seperti satu orang
+    if (VOICES.presets.length) selEl.value = `preset:${VOICES.presets[i % VOICES.presets.length].name}`;
+    const sync = () => { ownEl.style.display = selEl.value === "own" ? "block" : "none"; };
+    selEl.addEventListener("change", sync); sync();
+    attachRecorder(ids.uid, ids);
+    attachFilePicker(ids.uid, ids);
   }
 }
-function collectSpeakers(hostId) {
+// async: kalau ada speaker memakai suara sendiri, audionya perlu dikonversi dulu.
+async function collectSpeakers(hostId) {
   const out = [];
-  $(hostId).querySelectorAll("select[data-spk]").forEach((s) => (out[parseInt(s.dataset.spk)] = resolveVoice(s.value)));
+  const sels = Array.from($(hostId).querySelectorAll("select[data-spk]"));
+  for (const s of sels) {
+    const i = parseInt(s.dataset.spk);
+    if (s.value === "own") {
+      const ids = speakerIds(hostId, i);
+      const ref = await ownVoiceRef(ids.uid, ids);
+      if (!ref) throw new Error(`Speaker ${i}: unggah atau rekam suaranya dulu (atau pilih preset).`);
+      out[i] = ref;
+    } else out[i] = resolveVoice(s.value);
+  }
   return out;
 }
 
@@ -631,24 +700,72 @@ function collectSpeakers(hostId) {
 // ================== GENERASI CEPAT (chunk + paralel) ==================
 // Teks panjang dipecah jadi potongan kecil, digenerate BERBARENGAN, lalu digabung
 // berurutan. Ini yang membuat audio panjang selesai jauh lebih cepat.
-const CHUNK_MAX = 480;   // ± karakter per potongan
-const CONCURRENCY = 4;   // berapa potongan digarap sekaligus (jaga2 rate limit Boson)
+const CHUNK_MAX = 560;   // ± karakter per potongan (makin sedikit potongan = makin sedikit sambungan)
+const CHUNK_MIN = 140;   // potongan sependek ini digabung ke tetangganya (rawan artefak)
+const CONCURRENCY = 3;   // berapa potongan digarap sekaligus (jaga2 rate limit Boson)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Pecah jadi kalimat TANPA ikut memotong angka desimal (3.5) atau singkatan (Bpk.).
+function splitSentences(text) {
+  const guard = text
+    .replace(/(\d)\.(\d)/g, "$1\u0001$2")                 // 3.5  -> aman
+    .replace(/\b([A-Za-z]{1,3})\.(?=\s*[A-Za-z])/g, "$1\u0001"); // Bpk. / dr. / No.
+  const parts = guard.match(/[^.!?…]+[.!?…]+["'”’)\]]*\s*|[^.!?…]+$/g) || [guard];
+  return parts.map((s) => s.replace(/\u0001/g, ".").trim()).filter(Boolean);
+}
 
 function splitIntoChunks(text, maxLen = CHUNK_MAX) {
-  const paras = text.split(/\n+/).map((p) => p.trim()).filter(Boolean);
-  const chunks = []; let cur = "";
-  const push = () => { if (cur.trim()) chunks.push(cur.trim()); cur = ""; };
-  for (const para of paras) {
-    const sentences = para.match(/[^.!?]+[.!?]*\s*/g) || [para];
-    for (const s of sentences) {
-      if (cur && (cur + s).length > maxLen) push();
-      cur += s;
-      if (cur.length >= maxLen) push();
+  const raw = [];
+  for (const para of (text || "").split(/\n+/).map((p) => p.trim()).filter(Boolean)) {
+    let cur = "";
+    for (const s of splitSentences(para)) {
+      // kalimat kelewat panjang -> pecah di koma / titik koma, bukan di tengah kata
+      const pieces = s.length > maxLen ? (s.match(/[^,;:]+[,;:]?\s*/g) || [s]) : [s];
+      for (const p0 of pieces) {
+        const piece = p0.trim(); if (!piece) continue;
+        if (cur && (cur + " " + piece).length > maxLen) { raw.push(cur); cur = ""; }
+        cur = cur ? cur + " " + piece : piece;
+      }
     }
-    push(); // batas paragraf
+    if (cur) raw.push(cur);
   }
-  push();
-  return chunks.length ? chunks : [text];
+  // gabung potongan kelewat pendek supaya tidak banyak sambungan kecil
+  const out = [];
+  for (const c of raw) {
+    const last = out[out.length - 1];
+    if (last && (last.length + c.length + 1) <= maxLen && (last.length < CHUNK_MIN || c.length < CHUNK_MIN)) {
+      out[out.length - 1] = last + " " + c;
+    } else out.push(c);
+  }
+  const list = out.length ? out : [(text || "").trim()];
+  // pastikan tiap potongan punya penutup, biar model tidak "menggantung" di akhir
+  return list.filter(Boolean).map((c) => (/[.!?…,;:"'”’)\]]$/.test(c) ? c : c + "."));
+}
+
+// ---- indikator "Suara sedang dibuat …%" ----
+function setProgress(el, pct, label) {
+  const p = Math.max(0, Math.min(100, Math.round(pct)));
+  el.className = "status";
+  el.innerHTML = `<div class="prog"><div class="lbl"><span>${label}</span><b>${p}%</b></div>` +
+                 `<div class="bar"><div class="fill" style="width:${p}%"></div></div></div>`;
+}
+// Bar yang merayap halus supaya tidak terasa "macet" di antara potongan.
+function makeProgress(el, label = "Suara sedang dibuat…") {
+  let target = 3, shown = 0, txt = label;
+  const draw = () => setProgress(el, shown, txt);
+  const timer = setInterval(() => {
+    const ceil = Math.min(97, target + 7);
+    if (shown < target) shown += Math.max(0.7, (target - shown) * 0.3);
+    else if (shown < ceil) shown += 0.15;
+    if (shown > ceil) shown = ceil;
+    draw();
+  }, 120);
+  draw();
+  return {
+    set(p, l) { target = Math.max(target, p); if (l) txt = l; },
+    finish(msg = "Selesai") { clearInterval(timer); shown = target = 100; txt = msg; draw(); },
+    fail(msg) { clearInterval(timer); setStatus(el, msg, "err"); },
+  };
 }
 
 // jalankan pekerjaan paralel dengan batas concurrency, hasil tetap urut
@@ -680,26 +797,31 @@ function measureDuration(blob) {
 }
 
 async function speechChunk(input, voiceBody, tries = 3) {
-  // Batas durasi wajar untuk panjang teks ini. Kalau hasil jauh lebih panjang =
-  // model "ngelantur" (runaway) -> generate ulang. (Meniru anti-разнос engine Higgs.)
-  const maxSec = input.length * 0.15 + 6;
-  let best = null, bestDur = Infinity;
+  // Perkiraan durasi wajar untuk panjang teks ini (± 13 karakter per detik).
+  // Terlalu panjang  = model "ngelantur" (runaway).
+  // Terlalu pendek   = hasil TERPOTONG (kata tidak selesai diucapkan)  <-- ini yang dulu lolos.
+  const expect = input.length * 0.075;
+  const maxSec = expect * 2.2 + 6;
+  const minSec = Math.max(0.6, expect * 0.45);
+  let best = null, bestScore = Infinity;
   for (let a = 1; a <= tries; a++) {
     let blob;
     try {
       blob = await postJSON("/api/speech", { input, ...voiceBody }, true);
     } catch (e) {
-      if (a === tries) throw e;
-      await new Promise((r) => setTimeout(r, 800 * a)); // gagal jaringan -> tunggu & ulang
+      if (a === tries) { if (best) return best; throw e; }
+      await sleep(700 * a);                      // gagal jaringan -> tunggu & ulang
       continue;
     }
     const dur = await measureDuration(blob);
     if (!dur) return blob;                       // tak terukur -> pakai apa adanya
-    if (dur < bestDur) { best = blob; bestDur = dur; }
-    if (dur <= maxSec) return blob;              // durasi wajar -> pakai
-    if (a < tries) await new Promise((r) => setTimeout(r, 300)); // ngelantur -> coba lagi
+    if (dur >= minSec && dur <= maxSec) return blob;
+    // simpan kandidat terbaik; hasil terpotong dihukum 3x lebih berat daripada kepanjangan
+    const score = dur < minSec ? (minSec - dur) * 3 : (dur - maxSec);
+    if (score < bestScore) { best = blob; bestScore = score; }
+    if (a < tries) await sleep(300);
   }
-  return best;                                   // semua ngelantur -> ambil yang paling pendek
+  return best;
 }
 
 // gabung beberapa WAV jadi satu (byte-level, hemat memori) — untuk teks panjang
@@ -727,17 +849,21 @@ async function concatWav(blobs) {
   wr(36, "data"); h.setUint32(40, total, true);
   return new Blob([h, ...datas], { type: "audio/wav" });
 }
+// Selalu gabung lewat PCM (decode -> sambung -> encode WAV).
+// Menempel byte MP3 mentah = sumber "klik"/noise di tiap sambungan, jadi tidak dipakai lagi.
 async function mergeAudio(blobs, format) {
-  if (blobs.length === 1) return blobs[0];
-  return format === "wav" ? concatWav(blobs) : new Blob(blobs, { type: "audio/mpeg" });
+  const list = (blobs || []).filter(Boolean);
+  if (!list.length) throw new Error("Tidak ada audio yang berhasil dibuat.");
+  if (list.length === 1) return { blob: list[0], ext: format || "wav" };
+  try { return { blob: await joinPcmPad(list), ext: "wav" }; }
+  catch {
+    if (format === "wav") return { blob: await concatWav(list), ext: "wav" };
+    return { blob: new Blob(list, { type: "audio/mpeg" }), ext: "mp3" };
+  }
 }
 
-function statsCard(chunks, secs, chars) {
-  const s = (secs).toFixed(1);
-  return `<div class="row" style="gap:16px;margin:2px 0 12px;font-size:12.5px;color:var(--muted)">
-    <span>📦 <b style="color:var(--text)">${chunks}</b> chunk</span>
-    <span>⏱ <b style="color:var(--text)">${s}s</b> waktu render</span>
-    <span>🔤 <b style="color:var(--text)">${chars}</b> karakter</span></div>`;
+function doneCard(label) {
+  return `<div class="done">✅ ${label}</div>`;
 }
 // =====================================================================
 
@@ -747,23 +873,23 @@ $("tts-go").addEventListener("click", async () => {
   const voiceBody = { response_format: fmt(), ...resolveVoice($("tts-voice").value) };
   const chunks = splitIntoChunks(text);
   $("tts-go").disabled = true;
-  const t0 = performance.now();
-  setStatus($("tts-status"), `Menghasilkan… 0/${chunks.length} bagian`);
+  const prog = makeProgress($("tts-status"));
   try {
     const blobs = await runPool(
       chunks,
       (c) => speechChunk(c, voiceBody),
       CONCURRENCY,
-      (done, tot) => setStatus($("tts-status"), `Menghasilkan… ${done}/${tot} bagian`)
+      (done, tot) => prog.set(4 + (done / tot) * 90)
     );
-    const merged = await mergeAudio(blobs, fmt());
-    const secs = (performance.now() - t0) / 1000;
+    prog.set(96, "Menggabungkan…");
+    const { blob, ext } = await mergeAudio(blobs, fmt());
     const out = $("tts-out");
-    out.innerHTML = `<label class="field">Hasil</label>` + statsCard(chunks.length, secs, text.length);
-    out.appendChild(audioBlockFromBlob(merged, "voicepromax-tts." + fmt()));
-    setStatus($("tts-status"), `Selesai — ${chunks.length} bagian dalam ${secs.toFixed(1)} detik.`, "ok");
+    out.innerHTML = `<label class="field">Hasil</label>` + doneCard("Suara Sudah Jadi");
+    out.appendChild(audioBlockFromBlob(blob, "voicepromax-tts." + ext));
+    prog.finish("Selesai");
+    setTimeout(() => setStatus($("tts-status"), ""), 1500);
     afterGen();
-  } catch (e) { setStatus($("tts-status"), e.message, "err"); }
+  } catch (e) { prog.fail(e.message); }
   finally { $("tts-go").disabled = false; }
 });
 
@@ -771,14 +897,20 @@ $("tts-go").addEventListener("click", async () => {
 $("expr-go").addEventListener("click", async () => {
   const text = $("expr-text").value.trim();
   if (!text) return setStatus($("expr-status"), "Isi teksnya dulu.", "err");
-  $("expr-go").disabled = true; setStatus($("expr-status"), "Menghasilkan…");
+  $("expr-go").disabled = true;
+  const prog = makeProgress($("expr-status"));
   try {
-    const body = { input: text, response_format: fmt(), ...resolveVoice($("expr-voice").value) };
-    const blob = await postJSON("/api/speech", body, true);
-    $("expr-out").innerHTML = ""; $("expr-out").appendChild(audioBlockFromBlob(blob, "voicepromax-ekspresi." + fmt()));
-    setStatus($("expr-status"), "Selesai.", "ok");
+    const body = { response_format: fmt(), ...resolveVoice($("expr-voice").value) };
+    prog.set(35);
+    const blob = await speechChunk(text, body);
+    prog.set(95);
+    const out = $("expr-out");
+    out.innerHTML = doneCard("Suara Sudah Jadi");
+    out.appendChild(audioBlockFromBlob(blob, "voicepromax-ekspresi." + fmt()));
+    prog.finish("Selesai");
+    setTimeout(() => setStatus($("expr-status"), ""), 1500);
     afterGen();
-  } catch (e) { setStatus($("expr-status"), e.message, "err"); }
+  } catch (e) { prog.fail(e.message); }
   finally { $("expr-go").disabled = false; }
 });
 
@@ -809,49 +941,113 @@ function encodeWav(samples, sampleRate) {
   return new Blob([view], { type: "audio/wav" });
 }
 
-// Gabungkan beberapa audio jadi satu WAV yang MULUS + beri sedikit jeda di awal,
-// supaya awal kata tidak terpotong (fix kliping pada kloning). Mendekode tiap potongan
-// ke PCM lalu menyambungnya (bukan menempel byte mp3, yang bisa bikin bunyi terpotong).
-async function joinPcmPad(blobs, leadMs = 200, gapMs = 60) {
+// ---- perapian audio per potongan (menghilangkan noise/klik di sambungan) ----
+
+// Buang DC offset. Beda DC antar potongan = "tik" keras waktu disambung.
+function removeDC(buf) {
+  let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i];
+  const dc = sum / (buf.length || 1);
+  if (Math.abs(dc) > 1e-5) for (let i = 0; i < buf.length; i++) buf[i] -= dc;
+  return buf;
+}
+// Rapikan hening panjang di ujung, TAPI selalu sisakan margin 60 ms
+// supaya awal kata (konsonan lembut seperti "s", "h", "f") tidak ikut terpotong.
+function trimSilence(buf, sr, thr = 0.0025, keepMs = 60) {
+  const keep = Math.floor((sr * keepMs) / 1000);
+  let a = 0, b = buf.length - 1;
+  while (a < buf.length && Math.abs(buf[a]) < thr) a++;
+  while (b > a && Math.abs(buf[b]) < thr) b--;
+  if (a >= b) return buf;                       // seluruhnya hening -> biarkan
+  a = Math.max(0, a - keep);
+  b = Math.min(buf.length - 1, b + keep);
+  if (a === 0 && b === buf.length - 1) return buf;
+  return buf.subarray(a, b + 1);
+}
+// Fade 8 ms di kedua ujung: memutus lompatan gelombang yang terdengar sebagai "klik".
+function applyFade(buf, n) {
+  const m = Math.min(n, Math.floor(buf.length / 2));
+  for (let i = 0; i < m; i++) { const g = i / m; buf[i] *= g; buf[buf.length - 1 - i] *= g; }
+  return buf;
+}
+function rmsOf(buf) {
+  let s = 0; const step = Math.max(1, Math.floor(buf.length / 20000));
+  let n = 0; for (let i = 0; i < buf.length; i += step) { s += buf[i] * buf[i]; n++; }
+  return Math.sqrt(s / (n || 1));
+}
+
+// Gabungkan beberapa audio jadi satu WAV yang MULUS.
+// Tiap potongan didekode ke PCM, dibersihkan DC-nya, dirapikan heningnya,
+// disamakan kerasnya, lalu disambung dengan jeda pendek + fade.
+async function joinPcmPad(blobs, leadMs = 120, gapMs = 90) {
   const AC = window.AudioContext || window.webkitAudioContext;
   const ctx = new AC();
   let sr = 24000;
-  const parts = [];
-  for (const b of blobs) {
-    const dec = await ctx.decodeAudioData(await b.arrayBuffer());
-    sr = dec.sampleRate;
-    const len = dec.length, mono = new Float32Array(len);
-    for (let c = 0; c < dec.numberOfChannels; c++) {
-      const d = dec.getChannelData(c);
-      for (let i = 0; i < len; i++) mono[i] += d[i] / dec.numberOfChannels;
+  let parts = [];
+  try {
+    for (const b of blobs) {
+      const dec = await ctx.decodeAudioData(await b.arrayBuffer());
+      sr = dec.sampleRate;
+      const len = dec.length, mono = new Float32Array(len);
+      for (let c = 0; c < dec.numberOfChannels; c++) {
+        const d = dec.getChannelData(c);
+        for (let i = 0; i < len; i++) mono[i] += d[i] / dec.numberOfChannels;
+      }
+      parts.push(trimSilence(removeDC(mono), sr));
     }
-    parts.push(mono);
+  } finally { if (ctx.close) ctx.close(); }
+
+  // samakan kekerasan suara antar potongan (maks ±3 dB) supaya tidak "naik-turun"
+  const rms = parts.map(rmsOf).filter((v) => v > 1e-6).sort((x, y) => x - y);
+  const ref = rms.length ? rms[Math.floor(rms.length / 2)] : 0;
+  if (ref > 1e-6) {
+    parts = parts.map((p) => {
+      const r = rmsOf(p); if (r < 1e-6) return p;
+      const g = Math.max(0.71, Math.min(1.41, ref / r));
+      if (Math.abs(g - 1) < 0.02) return p;
+      const q = new Float32Array(p.length);
+      for (let i = 0; i < p.length; i++) q[i] = p[i] * g;
+      return q;
+    });
   }
-  if (ctx.close) ctx.close();
+
+  const fade = Math.max(8, Math.floor(sr * 0.008));
+  parts.forEach((p) => applyFade(p, fade));
+
   const lead = Math.floor((sr * leadMs) / 1000);
   const gap = Math.floor((sr * gapMs) / 1000);
-  let total = lead;
+  let total = lead + Math.floor(sr * 0.05);
   parts.forEach((p, i) => { total += p.length + (i < parts.length - 1 ? gap : 0); });
+
   const out = new Float32Array(total);
   let o = lead;
   parts.forEach((p, i) => { out.set(p, o); o += p.length + (i < parts.length - 1 ? gap : 0); });
+
+  // jaga-jaga jangan sampai kelebihan (clipping) sesudah penyamaan volume
+  let peak = 0; for (let i = 0; i < out.length; i++) { const v = Math.abs(out[i]); if (v > peak) peak = v; }
+  if (peak > 0.99) { const g = 0.99 / peak; for (let i = 0; i < out.length; i++) out[i] *= g; }
   return encodeWav(out, sr);
 }
-// Ukuran jadi kecil (± < 1 MB) supaya tidak menembus batas Vercel (413).
-async function toWavDataURL(src, targetSR = 16000, maxSec = 25) {
+// Siapkan audio referensi: mono, 24 kHz (bukan 16 kHz lagi — referensi 16 kHz
+// membuat hasil kloning terdengar tumpul & berdesis), hening di depan dibuang,
+// lalu volumenya dinormalkan. Tetap kecil (± 1 MB) supaya aman dari batas Vercel.
+async function toWavDataURL(src, targetSR = 24000, maxSec = 15) {
   const ab = await src.arrayBuffer();
   const AC = window.AudioContext || window.webkitAudioContext;
   const tmp = new AC();
   const decoded = await tmp.decodeAudioData(ab);
   if (tmp.close) tmp.close();
 
-  const srcLen = Math.min(decoded.length, Math.floor(decoded.sampleRate * maxSec));
-  // mixdown ke mono dulu
-  const monoIn = new Float32Array(srcLen);
+  // mixdown ke mono dulu (seluruh durasi, pemotongan dilakukan setelah trim hening)
+  const full = new Float32Array(decoded.length);
   for (let c = 0; c < decoded.numberOfChannels; c++) {
     const d = decoded.getChannelData(c);
-    for (let i = 0; i < srcLen; i++) monoIn[i] += d[i] / decoded.numberOfChannels;
+    for (let i = 0; i < decoded.length; i++) full[i] += d[i] / decoded.numberOfChannels;
   }
+  // buang hening/napas di awal, lalu ambil maksimal maxSec detik
+  const trimmed = trimSilence(removeDC(full), decoded.sampleRate, 0.004, 40);
+  const srcLen = Math.min(trimmed.length, Math.floor(decoded.sampleRate * maxSec));
+  const monoIn = trimmed.subarray(0, srcLen);
+
   // resample ke targetSR pakai OfflineAudioContext
   const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   const outLen = Math.max(1, Math.ceil((srcLen / decoded.sampleRate) * targetSR));
@@ -861,106 +1057,132 @@ async function toWavDataURL(src, targetSR = 16000, maxSec = 25) {
   const node = off.createBufferSource();
   node.buffer = inBuf; node.connect(off.destination); node.start();
   const rendered = await off.startRendering();
-  return blobToDataURL(encodeWav(rendered.getChannelData(0), targetSR));
+
+  // normalkan puncak ke 0.95 supaya referensi tidak terlalu pelan/keras
+  const out = rendered.getChannelData(0);
+  let peak = 0; for (let i = 0; i < out.length; i++) { const v = Math.abs(out[i]); if (v > peak) peak = v; }
+  if (peak > 1e-4) { const g = 0.95 / peak; for (let i = 0; i < out.length; i++) out[i] *= g; }
+  applyFade(out, Math.floor(targetSR * 0.005));
+  return blobToDataURL(encodeWav(out, targetSR));
 }
 
-// --- Rekam dari mikrofon ---
-let mediaRecorder = null, recChunks = [], recordedBlob = null, recTimer = null;
-$("rec-btn").addEventListener("click", async () => {
-  // Sedang merekam -> stop
-  if (mediaRecorder && mediaRecorder.state === "recording") {
-    mediaRecorder.stop();
-    return;
-  }
-  // Mulai merekam
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    return setStatus($("rec-status"), "Browser tidak mendukung perekaman. Pakai unggah file.", "err");
-  }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    recChunks = [];
-    mediaRecorder = new MediaRecorder(stream);
-    mediaRecorder.ondataavailable = (e) => { if (e.data.size) recChunks.push(e.data); };
-    mediaRecorder.onstop = async () => {
-      clearInterval(recTimer);
-      stream.getTracks().forEach((t) => t.stop()); // matikan indikator mic
-      recordedBlob = new Blob(recChunks, { type: recChunks[0]?.type || "audio/webm" });
-      const url = URL.createObjectURL(recordedBlob);
-      const pv = $("rec-preview"); pv.src = url; pv.style.display = "block";
-      $("clone-file").value = ""; // rekaman menggantikan file unggahan
-      $("file-preview").style.display = "none";
-      $("rec-btn").textContent = "🎙️ Rekam ulang";
-      setStatus($("rec-status"), "Rekaman siap dipakai.", "ok");
-    };
-    mediaRecorder.start();
-    // batasi otomatis 30 detik
-    let sec = 0;
-    setStatus($("rec-status"), "● Merekam… (klik lagi untuk berhenti)", "");
-    recTimer = setInterval(() => {
-      sec++;
-      $("rec-status").textContent = `● Merekam… ${sec}s (klik lagi untuk berhenti)`;
-      if (sec >= 30) mediaRecorder.stop();
-    }, 1000);
-    $("rec-btn").textContent = "⏹ Berhenti";
-  } catch (e) {
-    setStatus($("rec-status"), "Izin mikrofon ditolak atau gagal.", "err");
-  }
-});
+// --- Rekam dari mikrofon (dipakai tab Kloning, Podcast, & Buku Audio) ---
+const OWN_REC = {};    // key -> Blob hasil rekaman
+const OWN_CACHE = {};  // key -> data URL hasil konversi (biar tidak konversi ulang tiap potongan)
+const RECORDERS = {};
+
+function attachRecorder(key, ids) {
+  const bt = $(ids.btn);
+  if (!bt) return;
+  bt.addEventListener("click", async () => {
+    const cur = RECORDERS[key];
+    if (cur && cur.state === "recording") { cur.stop(); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+      return setStatus($(ids.status), "Browser tidak mendukung perekaman. Pakai unggah file.", "err");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      const chunks = [];
+      const mr = new MediaRecorder(stream);
+      RECORDERS[key] = mr;
+      let sec = 0, timer = null;
+      mr.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      mr.onstop = () => {
+        clearInterval(timer);
+        stream.getTracks().forEach((t) => t.stop());     // matikan indikator mic
+        OWN_REC[key] = new Blob(chunks, { type: chunks[0]?.type || "audio/webm" });
+        OWN_CACHE[key] = null;
+        const pv = $(ids.preview);
+        if (pv) { pv.src = URL.createObjectURL(OWN_REC[key]); pv.style.display = "block"; }
+        if ($(ids.file)) $(ids.file).value = "";          // rekaman menggantikan file unggahan
+        if (ids.otherPreview && $(ids.otherPreview)) $(ids.otherPreview).style.display = "none";
+        bt.textContent = "🎙️ Rekam ulang";
+        setStatus($(ids.status), "Rekaman siap dipakai.", "ok");
+        RECORDERS[key] = null;
+      };
+      mr.start();
+      bt.textContent = "⏹ Berhenti";
+      setStatus($(ids.status), "● Merekam… (klik lagi untuk berhenti)");
+      timer = setInterval(() => {                          // batasi otomatis 30 detik
+        sec++;
+        $(ids.status).textContent = `● Merekam… ${sec}s (klik lagi untuk berhenti)`;
+        if (sec >= 30) mr.stop();
+      }, 1000);
+    } catch (e) {
+      setStatus($(ids.status), "Izin mikrofon ditolak atau gagal.", "err");
+    }
+  });
+}
 
 // Kalau user memilih file unggahan, tampilkan preview & batalkan rekaman agar tidak bentrok.
-$("clone-file").addEventListener("change", () => {
-  const f = $("clone-file").files[0];
-  if (f) {
-    recordedBlob = null;
-    $("rec-preview").style.display = "none";
-    $("rec-btn").textContent = "🎙️ Mulai rekam";
-    setStatus($("rec-status"), "");
-    const pv = $("file-preview");
-    pv.src = URL.createObjectURL(f);
-    pv.style.display = "block"; // user bisa dengar dulu sebelum generate
-  } else {
-    $("file-preview").style.display = "none";
+function attachFilePicker(key, ids) {
+  const inp = $(ids.file);
+  if (!inp) return;
+  inp.addEventListener("change", () => {
+    const f = inp.files[0];
+    OWN_REC[key] = null; OWN_CACHE[key] = null;
+    if ($(ids.preview) && ids.preview !== ids.filePreview) $(ids.preview).style.display = "none";
+    if ($(ids.btn)) $(ids.btn).textContent = "🎙️ Mulai rekam";
+    if ($(ids.status)) setStatus($(ids.status), "");
+    const pv = $(ids.filePreview || ids.preview);
+    if (!pv) return;
+    if (f) { pv.src = URL.createObjectURL(f); pv.style.display = "block"; }  // bisa didengar dulu
+    else pv.style.display = "none";
+  });
+}
+
+// Ambil referensi suara sendiri (rekaman atau unggahan) sebagai data URL siap kirim.
+async function ownVoiceRef(key, ids) {
+  const file = $(ids.file)?.files?.[0] || null;
+  const src = OWN_REC[key] || file;
+  if (!src) return null;
+  if (!OWN_CACHE[key]) {
+    try { OWN_CACHE[key] = await toWavDataURL(src); }
+    catch { OWN_CACHE[key] = await blobToDataURL(src); }
   }
-});
+  const ref_text = (ids.reftext && $(ids.reftext) ? $(ids.reftext).value : "").trim();
+  return { ref_audio: OWN_CACHE[key], ...(ref_text ? { ref_text } : {}) };
+}
+
+const CLONE_IDS = { btn: "rec-btn", status: "rec-status", preview: "rec-preview",
+                    file: "clone-file", filePreview: "file-preview", reftext: "clone-reftext" };
+attachRecorder("clone", CLONE_IDS);
+attachFilePicker("clone", CLONE_IDS);
 
 $("clone-go").addEventListener("click", async () => {
   const text = $("clone-text").value.trim();
   if (!text) return setStatus($("clone-status"), "Isi teksnya dulu.", "err");
-  const file = $("clone-file").files[0];
   const preset = $("clone-preset").value;
-  if (!recordedBlob && !file && !preset)
+  const punyaSuara = Boolean(OWN_REC.clone || $("clone-file").files[0]);
+  if (!punyaSuara && !preset)
     return setStatus($("clone-status"), "Rekam suara, unggah audio, atau pilih preset.", "err");
   $("clone-go").disabled = true;
-  const t0 = performance.now();
-  setStatus($("clone-status"), "Menyiapkan audio referensi…");
+  const prog = makeProgress($("clone-status"), "Menyiapkan audio referensi…");
   try {
     // Siapkan "suara" SEKALI, lalu dipakai ulang untuk semua potongan.
-    const voiceBody = { response_format: fmt(), ref_text: $("clone-reftext").value.trim() };
-    if (recordedBlob) {
-      try { voiceBody.ref_audio = await toWavDataURL(recordedBlob); }
-      catch { voiceBody.ref_audio = await blobToDataURL(recordedBlob); }
-    } else if (file) {
-      try { voiceBody.ref_audio = await toWavDataURL(file); }
-      catch { voiceBody.ref_audio = await readFileAsDataURL(file); }
-    } else { voiceBody.preset = preset; }
+    let voiceBody = { response_format: fmt() };
+    if (punyaSuara) voiceBody = { ...voiceBody, ...(await ownVoiceRef("clone", CLONE_IDS)) };
+    else voiceBody.preset = preset;
 
+    prog.set(6, "Suara sedang dibuat…");
     // Pecah teks -> generate paralel (maks 2 sekaligus, jaga2 batas ukuran) -> gabung.
     const chunks = splitIntoChunks(text);
-    setStatus($("clone-status"), `Menghasilkan… 0/${chunks.length} bagian`);
     const blobs = await runPool(
       chunks,
       (c) => speechChunk(c, voiceBody),
       2,
-      (done, tot) => setStatus($("clone-status"), `Menghasilkan… ${done}/${tot} bagian`)
+      (done, tot) => prog.set(6 + (done / tot) * 88)
     );
-    const merged = await joinPcmPad(blobs).catch(() => mergeAudio(blobs, "wav"));
-    const secs = (performance.now() - t0) / 1000;
+    prog.set(96, "Menggabungkan…");
+    const { blob } = await mergeAudio(blobs, "wav");
     const out = $("clone-out");
-    out.innerHTML = `<label class="field">Hasil</label>` + statsCard(chunks.length, secs, text.length);
-    out.appendChild(audioBlockFromBlob(merged, "voicepromax-kloning.wav"));
-    setStatus($("clone-status"), `Selesai — ${chunks.length} bagian dalam ${secs.toFixed(1)} detik.`, "ok");
+    out.innerHTML = `<label class="field">Hasil</label>` + doneCard("Kloning Sudah Jadi");
+    out.appendChild(audioBlockFromBlob(blob, "voicepromax-kloning.wav"));
+    prog.finish("Selesai");
+    setTimeout(() => setStatus($("clone-status"), ""), 1500);
     afterGen();
-  } catch (e) { setStatus($("clone-status"), e.message, "err"); }
+  } catch (e) { prog.fail(e.message); }
   finally { $("clone-go").disabled = false; }
 });
 
@@ -978,57 +1200,84 @@ function parseScript(script) {
   }
   return out;
 }
-async function runMulti(scriptId, hostId, statusId, outId, btn, prefix) {
+async function runMulti(scriptId, hostId, statusId, outId, btn, prefix, doneLabel) {
   const script = $(scriptId).value.trim();
   if (!script) return setStatus($(statusId), "Skrip masih kosong.", "err");
   const turns = parseScript(script);
   if (!turns.length) return setStatus($(statusId), "Skrip kosong.", "err");
-  const speakers = collectSpeakers(hostId);
+
   btn.disabled = true;
-  const out = $(outId); out.innerHTML = `<label class="field">Hasil per giliran</label>`;
-  const blobs = [];
-  for (let i = 0; i < turns.length; i++) {
-    const { speaker, text } = turns[i];
-    setStatus($(statusId), `Memproses ${i + 1}/${turns.length} · Speaker ${speaker}…`);
-    const sp = speakers[speaker] || speakers[0] || {};
-    try {
-      const blob = await postJSON("/api/speech", { input: text, response_format: fmt(), ...sp }, true);
-      blobs.push(blob);
-      const url = URL.createObjectURL(blob);
+  const prog = makeProgress($(statusId), "Menyiapkan suara…");
+  let speakers;
+  try { speakers = await collectSpeakers(hostId); }
+  catch (e) { prog.fail(e.message); btn.disabled = false; return; }
+
+  // Giliran yang panjang tetap dipecah, tapi potongannya digabung lagi per giliran.
+  const jobs = [];
+  turns.forEach((t, ti) => splitIntoChunks(t.text).forEach((c) => jobs.push({ ti, c })));
+  const pakaiSuaraSendiri = speakers.some((sp) => sp && sp.ref_audio);
+  const conc = pakaiSuaraSendiri ? 2 : CONCURRENCY;   // ref_audio berat, jangan terlalu paralel
+
+  const out = $(outId);
+  try {
+    prog.set(5, "Suara sedang dibuat…");
+    const results = await runPool(
+      jobs,
+      (j) => speechChunk(j.c, { response_format: "wav", ...(speakers[turns[j.ti].speaker] || speakers[0] || {}) })
+               .catch(() => null),
+      conc,
+      (done, tot) => prog.set(5 + (done / tot) * 88)
+    );
+    prog.set(95, "Menggabungkan…");
+
+    const perTurn = turns.map(() => []);
+    results.forEach((b, k) => perTurn[jobs[k].ti].push(b));
+
+    const semua = [];
+    const segs = document.createElement("div");
+    for (let i = 0; i < turns.length; i++) {
+      const { speaker, text } = turns[i];
+      const ok = perTurn[i].filter(Boolean);
       const d = document.createElement("div"); d.className = "seg";
-      d.innerHTML = `<div class="who">Speaker ${speaker}</div><div class="txt">${text.replace(/</g,"&lt;")}</div><audio controls src="${url}"></audio>`;
-      out.appendChild(d);
-    } catch (e) {
-      const d = document.createElement("div"); d.className = "seg";
-      d.innerHTML = `<div class="txt" style="color:var(--danger)">Speaker ${speaker}: gagal — ${e.message}</div>`;
-      out.appendChild(d);
+      if (!ok.length) {
+        d.innerHTML = `<div class="txt" style="color:var(--danger)">Speaker ${speaker}: gagal dibuat.</div>`;
+        segs.appendChild(d); continue;
+      }
+      const { blob } = await mergeAudio(ok, "wav");
+      semua.push(blob);
+      d.innerHTML = `<div class="who">Speaker ${speaker}</div><div class="txt">${text.replace(/</g, "&lt;")}</div>` +
+                    `<audio controls src="${URL.createObjectURL(blob)}"></audio>`;
+      segs.appendChild(d);
     }
-  }
-  if (blobs.length) {
-    const merged = new Blob(blobs, { type: blobs[0].type || "audio/mpeg" });
-    const mUrl = URL.createObjectURL(merged);
-    const foot = document.createElement("div"); foot.style.marginTop = "12px";
-    foot.innerHTML = `<a class="dl" href="${mUrl}" download="voicepromax-${prefix}-gabungan.${fmt()}">⬇ Unduh gabungan (${prefix}.${fmt()})</a>`;
-    out.appendChild(foot);
-  }
-  setStatus($(statusId), "Selesai — " + turns.length + " giliran.", "ok");
-  afterGen();
-  btn.disabled = false;
+    if (!semua.length) throw new Error("Tidak ada audio yang berhasil dibuat.");
+
+    const full = await mergeAudio(semua, "wav");
+    out.innerHTML = `<label class="field">Hasil</label>` + doneCard(doneLabel);
+    out.appendChild(audioBlockFromBlob(full.blob, `voicepromax-${prefix}.wav`));
+    const lbl = document.createElement("label");
+    lbl.className = "field"; lbl.style.marginTop = "18px"; lbl.textContent = "Per giliran bicara";
+    out.appendChild(lbl); out.appendChild(segs);
+
+    prog.finish("Selesai");
+    setTimeout(() => setStatus($(statusId), ""), 1500);
+    afterGen();
+  } catch (e) { prog.fail(e.message); }
+  finally { btn.disabled = false; }
 }
-$("pod-go").addEventListener("click", () => runMulti("pod-script", "pod-speakers", "pod-status", "pod-out", $("pod-go"), "podcast"));
-$("book-go").addEventListener("click", () => runMulti("book-script", "book-speakers", "book-status", "book-out", $("book-go"), "buku-audio"));
+$("pod-go").addEventListener("click", () => runMulti("pod-script", "pod-speakers", "pod-status", "pod-out", $("pod-go"), "podcast", "Podcast Sudah Jadi"));
+$("book-go").addEventListener("click", () => runMulti("book-script", "book-speakers", "book-status", "book-out", $("book-go"), "buku-audio", "Buku Audio Sudah Jadi"));
 
 // ---- Batch ----
 $("batch-go").addEventListener("click", async () => {
   const lines = $("batch-text").value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (!lines.length) return setStatus($("batch-status"), "Belum ada baris teks.", "err");
   $("batch-go").disabled = true;
+  const prog = makeProgress($("batch-status"));
   const out = $("batch-out"); out.innerHTML = `<label class="field">Hasil (${lines.length})</label>`;
   const v = resolveVoice($("batch-voice").value);
   for (let i = 0; i < lines.length; i++) {
-    setStatus($("batch-status"), `Memproses ${i + 1}/${lines.length}…`);
     try {
-      const blob = await postJSON("/api/speech", { input: lines[i], response_format: fmt(), ...v }, true);
+      const blob = await speechChunk(lines[i], { response_format: fmt(), ...v });
       const d = document.createElement("div"); d.className = "seg";
       d.innerHTML = `<div class="txt">${(i + 1) + ". " + lines[i].slice(0, 80).replace(/</g,"&lt;")}</div>`;
       d.appendChild(audioBlockFromBlob(blob, `voicepromax-batch-${i + 1}.${fmt()}`));
@@ -1038,8 +1287,10 @@ $("batch-go").addEventListener("click", async () => {
       d.innerHTML = `<div class="txt" style="color:var(--danger)">${i + 1}. Gagal: ${e.message}</div>`;
       out.appendChild(d);
     }
+    prog.set(((i + 1) / lines.length) * 98);
   }
-  setStatus($("batch-status"), "Selesai.", "ok");
+  prog.finish("Selesai");
+  setTimeout(() => setStatus($("batch-status"), ""), 1500);
   afterGen();
   $("batch-go").disabled = false;
 });
