@@ -188,8 +188,14 @@
     <div class="toolbar">
       <label>Format keluaran</label>
       <select id="fmt"><option value="mp3">mp3</option><option value="wav">wav</option></select>
-      <label style="display:flex;align-items:center;gap:6px;cursor:pointer" title="Buang letupan/derau sebelum kata pertama. Matikan kalau ucapan terdengar terpotong.">
-        <input type="checkbox" id="tidy" /> Rapikan otomatis
+      <label title="Potongan lebih panjang = lebih sedikit sambungan = suara lebih mengalir. Pilih Pendek kalau server sering menolak permintaan.">Panjang potongan</label>
+      <select id="chunklen" title="Potongan lebih panjang = lebih sedikit sambungan = suara lebih mengalir.">
+        <option value="pendek">Pendek</option>
+        <option value="sedang" selected>Sedang (disarankan)</option>
+        <option value="panjang">Panjang — paling mengalir</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer" title="Pemangkasan ekstra untuk letupan/derau keras sebelum kata pertama. Hening berlebih sudah dipangkas otomatis, jadi ini biasanya tidak perlu.">
+        <input type="checkbox" id="tidy" /> Rapikan ekstra
       </label>
       <span class="hint" id="cfgHint"></span>
       <span style="flex:1"></span>
@@ -370,10 +376,20 @@ async function postJSON(path, body, wantBlob) {
   });
   if (!res.ok) {
     let msg = "Gagal (HTTP " + res.status + ").";
-    let needLogin = false;
-    try { const j = await res.json(); if (j.error) msg = j.error + (j.detail ? " — " + j.detail : ""); needLogin = Boolean(j.needLogin); } catch {}
+    let needLogin = false, detail = "", retryAfter = null;
+    const h = res.headers.get("retry-after");
+    if (h) { const n = Number(h); if (isFinite(n)) retryAfter = n; }
+    try {
+      const j = await res.json();
+      if (j.error) msg = j.error + (j.detail ? " — " + j.detail : "");
+      needLogin = Boolean(j.needLogin);
+      detail = j.detail || "";
+      if (j.retryAfter != null && isFinite(Number(j.retryAfter))) retryAfter = Number(j.retryAfter);
+    } catch {}
     if (needLogin) { $("login").classList.add("show"); }  // hanya login web, bukan API key Boson
-    throw new Error(msg);
+    // Status HTTP WAJIB ikut terbawa. Tanpa ini pemanggil tidak bisa membedakan
+    // 429 (perlu ditunggu lalu diulang) dari 400 (diulang pun tidak akan berhasil).
+    throw Object.assign(new Error(msg), { status: res.status, retryAfter, detail, needLogin });
   }
   return wantBlob ? res.blob() : res.json();
 }
@@ -815,10 +831,75 @@ async function collectSpeakers(hostId) {
 // berurutan. Ini yang membuat audio panjang selesai jauh lebih cepat.
 // Setelan pabrik, sama dengan _chunk(max_chars=120) di higgs_engine/app.py:
 // paragraf dipisah baris kosong, paragraf panjang dipecah per kalimat.
-const CHUNK_MAX = 120;   // ± karakter per potongan
-const CHUNK_MIN = 40;    // di bawah ini digabung ke tetangga (masih dalam paragraf yang sama)
-const CONCURRENCY = 3;   // berapa potongan digarap sekaligus (jaga2 rate limit Boson)
+// Potongan yang TERLALU KECIL adalah penyebab utama suara "patah-patah": tiap
+// potongan digenerate terpisah, jadi nada, tempo, dan tenaga bicara ikut mulai
+// dari nol lagi di setiap sambungan. 120 karakter berarti sambungan baru setiap
+// ±6 detik. Sekarang jauh lebih panjang, dan bisa diatur pengguna.
+const CHUNK_PILIHAN = { pendek: 170, sedang: 320, panjang: 460 };
+function chunkMax() {
+  const el = $("chunklen");
+  return CHUNK_PILIHAN[el && el.value] || CHUNK_PILIHAN.sedang;
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ================== PENGATUR LAJU PERMINTAAN (anti HTTP 429) ==================
+// Penyebab error 429 sebelumnya: potongan dikirim 3 sekaligus TANPA jeda sama
+// sekali, dan setiap kegagalan langsung diulang. Sekarang SEMUA permintaan ke
+// /api/speech — dari tab mana pun — harus lewat gerbang() di bawah ini, yang:
+//   1. menjaga jeda minimum antar permintaan (tidak bertubi-tubi),
+//   2. membatasi jumlah permintaan yang berjalan bersamaan,
+//   3. menahan seluruh antrean selama "masa dingin" setelah kena 429,
+//   4. menurunkan laju sendiri saat kena limit, lalu memulihkannya perlahan.
+const LAJU = {
+  maksParalel: 3,      // batas atas jumlah permintaan bersamaan
+  paralel: 3,          // nilai berjalan (turun otomatis saat kena 429)
+  jedaMin: 320,        // jeda minimum antar permintaan (ms)
+  jedaMinAwal: 320,
+  jedaMinMaks: 6000,
+  dinginSampai: 0,     // sebelum waktu ini, tidak ada permintaan yang dikirim
+  sukses: 0,
+};
+const _antre = [];
+let _jalan = 0, _mulaiTerakhir = 0, _timerLaju = null;
+
+function gerbang(tugas) {
+  return new Promise((resolve, reject) => {
+    _antre.push({ tugas, resolve, reject });
+    pompa();
+  });
+}
+function pompa() {
+  if (_timerLaju || !_antre.length || _jalan >= LAJU.paralel) return;
+  const kini = Date.now();
+  // Tunggu yang paling lama di antara: masa dingin & jeda minimum antar kirim.
+  const tunggu = Math.max(LAJU.dinginSampai - kini, _mulaiTerakhir + LAJU.jedaMin - kini, 0);
+  if (tunggu > 0) {
+    _timerLaju = setTimeout(() => { _timerLaju = null; pompa(); }, tunggu);
+    return;
+  }
+  const kerja = _antre.shift();
+  _jalan++; _mulaiTerakhir = kini;
+  Promise.resolve().then(kerja.tugas).then(kerja.resolve, kerja.reject)
+    .then(() => { _jalan--; pompa(); });
+  pompa();   // isi slot berikutnya (tetap akan tertahan jedaMin)
+}
+// Kena batas -> melambat. Turunkan paralel, panjangkan jeda, dan diamkan
+// seluruh antrean selama Retry-After yang diminta server.
+function kenaBatas(retryAfterDetik) {
+  LAJU.paralel = Math.max(1, LAJU.paralel - 1);
+  LAJU.jedaMin = Math.min(LAJU.jedaMinMaks, Math.round(LAJU.jedaMin * 1.8) + 250);
+  const jeda = Math.max(1000, retryAfterDetik ? retryAfterDetik * 1000 : LAJU.jedaMin * 2);
+  LAJU.dinginSampai = Math.max(LAJU.dinginSampai, Date.now() + jeda);
+  LAJU.sukses = 0;
+  return jeda;
+}
+// Lancar beberapa kali -> pulih perlahan, jangan langsung balik kencang.
+function lancar() {
+  if (++LAJU.sukses < 6) return;
+  LAJU.sukses = 0;
+  LAJU.jedaMin = Math.max(LAJU.jedaMinAwal, Math.round(LAJU.jedaMin * 0.7));
+  LAJU.paralel = Math.min(LAJU.maksParalel, LAJU.paralel + 1);
+}
 
 // Titik yang MENGAKHIRI kalimat = titik yang diikuti spasi atau akhir teks.
 // Dengan aturan ini "Lynk.id", "3.5", dan "co.id" tidak pernah ikut terpotong.
@@ -838,7 +919,7 @@ function kelompokkan(bounds, mulai, akhir, maxLen) {
   if (prev > start) segs.push([start, prev]);
   return segs.length ? segs : [[mulai, akhir]];
 }
-function potongParagraf(para, maxLen) {
+function potongParagraf(para, maxLen, minLen) {
   let segs = kelompokkan(batasKalimat(para), 0, para.length, maxLen);
   // kalimat tunggal yang masih kepanjangan -> potong di koma / titik koma
   const hasil = [];
@@ -854,7 +935,7 @@ function potongParagraf(para, maxLen) {
   const rapi = [];
   for (const seg of hasil) {
     const last = rapi[rapi.length - 1];
-    if (last && seg[1] - last[0] <= maxLen && (last[1] - last[0] < CHUNK_MIN || seg[1] - seg[0] < CHUNK_MIN)) last[1] = seg[1];
+    if (last && seg[1] - last[0] <= maxLen && (last[1] - last[0] < minLen || seg[1] - seg[0] < minLen)) last[1] = seg[1];
     else rapi.push([seg[0], seg[1]]);
   }
   return rapi;
@@ -863,23 +944,47 @@ function potongParagraf(para, maxLen) {
 // Pecah teks TANPA mengubah isinya: tiap potongan adalah irisan persis dari teks
 // asli. Versi lama menyambung ulang dengan spasi sehingga "Lynk.id" berubah jadi
 // "Lynk. id" — dan model membacanya sebagai akhir kalimat.
-function splitIntoChunks(text, maxLen = CHUNK_MAX) {
+// Setiap potongan sekarang membawa JENIS batas yang ada SESUDAHNYA:
+//   "lanjut"   = masih di tengah kalimat  -> jeda sambungan harus nyaris nol
+//   "kalimat"  = kalimat selesai          -> jeda sedang
+//   "paragraf" = paragraf selesai         -> jeda panjang
+// Dulu semua sambungan diberi hening 0,3 detik yang sama, termasuk di tengah
+// kalimat. Itulah sumber utama keluhan "patah-patah".
+function splitIntoChunks(text, maxLen = chunkMax()) {
   const src = text || "";
   const out = [];
   let pos = 0;
+  const minLen = Math.round(maxLen * 0.35);   // di bawah ini digabung ke tetangga
   for (const para of src.split(/\n\s*\n/)) {              // paragraf dipisah baris kosong
     const mulai = src.indexOf(para, pos);
     pos = mulai + para.length;
     if (!para.trim()) continue;
-    for (const [a, b] of potongParagraf(para, maxLen)) {
+    const segs = potongParagraf(para, maxLen, minLen);
+    segs.forEach(([a, b], i) => {
       const potongan = src.slice(mulai + a, mulai + b).trim();
-      if (potongan) out.push(potongan);
-    }
+      if (!potongan) return;
+      const tutupKalimat = /[.!?…]["'”’)\]]*$/.test(potongan);
+      out.push({
+        teks: potongan,
+        jenis: i === segs.length - 1 ? "paragraf" : (tutupKalimat ? "kalimat" : "lanjut"),
+      });
+    });
   }
-  const list = out.length ? out : [src.trim()].filter(Boolean);
-  // beri penutup hanya kalau benar-benar tidak ada tanda baca di ujung
-  return list.map((c) => (/[.!?…,;:"'”’)\]]$/.test(c) ? c : c + "."));
+  if (!out.length) {
+    const t = src.trim();
+    return t ? [{ teks: t, jenis: "paragraf" }] : [];
+  }
+  out[out.length - 1].jenis = "paragraf";                 // ujung teks = penutup
+  // Tambahkan tanda baca HANYA kalau ujungnya benar-benar kosong. Dulu selalu
+  // ditambah "." — di tengah kalimat itu memaksa model menurunkan nada seolah
+  // kalimat sudah habis, sehingga sambungannya terdengar terputus.
+  return out.map((c) => {
+    if (!/[.!?…,;:"'”’)\]]$/.test(c.teks)) c.teks += c.jenis === "lanjut" ? "," : ".";
+    return c;
+  });
 }
+const teksChunk = (cs) => cs.map((c) => c.teks);
+const jenisChunk = (cs) => cs.map((c) => c.jenis);
 
 // Titik di dalam nama domain harus DIBACA "dot", bukan dijadikan jeda.
 // "Lynk.id" -> "Lynk dot id", "toko.co.id" -> "toko dot co dot id".
@@ -944,7 +1049,12 @@ function measureDuration(blob) {
   });
 }
 
-async function speechChunk(input, voiceBody, tries = 3) {
+// Status yang tidak ada gunanya diulang: teks bermasalah, sesi habis, payload
+// kebesaran. Mengulanginya hanya menambah beban dan mempercepat kena 429.
+const STATUS_PERMANEN = new Set([400, 401, 403, 404, 413, 422]);
+const MAX_COBA = 5;
+
+async function speechChunk(input, voiceBody, prog) {
   // Perkiraan durasi wajar untuk panjang teks ini (± 13 karakter per detik).
   // Terlalu panjang  = model "ngelantur" (runaway).
   // Terlalu pendek   = hasil TERPOTONG (kata tidak selesai diucapkan)  <-- ini yang dulu lolos.
@@ -953,21 +1063,42 @@ async function speechChunk(input, voiceBody, tries = 3) {
   // HANYA batas atas. Batas bawah sengaja tidak ada — menolak hasil "terlalu pendek"
   // justru membuat sistem memilih take yang lebih buruk.
   const maxSec = 0.13 * Math.max(teks.length, 1) + 3.0;
-  let terakhir = null;
-  for (let a = 1; a <= tries; a++) {
+  const { refTrimmed, ...kirim } = voiceBody || {};   // penanda internal, jangan dikirim
+  const kabar = (m) => { if (prog) prog.set(0, m); };
+  let terakhir = null, sedangTunggu = false;
+
+  for (let a = 1; a <= MAX_COBA; a++) {
     let blob;
     try {
-      const { refTrimmed, ...kirim } = voiceBody;   // penanda internal, jangan dikirim
-      blob = await postJSON("/api/speech", { input: teks, ...kirim }, true);
+      // Lewat gerbang: jeda antar permintaan & masa dingin ditegakkan di sini.
+      blob = await gerbang(() => postJSON("/api/speech", { input: teks, ...kirim }, true));
+      if (sedangTunggu) { kabar("Suara sedang dibuat…"); sedangTunggu = false; }
+      lancar();
     } catch (e) {
-      if (a === tries) { if (terakhir) return terakhir; throw e; }
-      await sleep(700 * a);                      // gagal jaringan -> tunggu & ulang
+      if (e.status && STATUS_PERMANEN.has(e.status)) throw e;   // diulang pun sia-sia
+      if (a === MAX_COBA) { if (terakhir) return terakhir; throw e; }
+      sedangTunggu = true;
+      if (e.status === 429 || e.status === 503) {
+        // Kena limit: turunkan laju untuk SELURUH antrean. Tidak perlu sleep di
+        // sini — gerbang() sudah menahan percobaan berikutnya sampai masa dingin
+        // habis, jadi permintaan lain pun ikut melambat.
+        const jeda = kenaBatas(e.retryAfter);
+        kabar(`Kuota server penuh — otomatis melambat, lanjut ±${Math.ceil(jeda / 1000)} detik…`);
+      } else {
+        // Backoff eksponensial + jitter: 0,7s → 1,4s → 2,8s → 5,6s (maks 15s).
+        // Jitter mencegah semua potongan bangun serentak lalu menabrak limit lagi.
+        let jeda = Math.round(700 * Math.pow(2, a - 1) * (0.7 + Math.random() * 0.6));
+        if (e.retryAfter) jeda = Math.max(jeda, e.retryAfter * 1000);
+        jeda = Math.min(jeda, 15000);
+        kabar(`Gangguan sesaat — mencoba lagi dalam ${Math.ceil(jeda / 1000)} detik…`);
+        await sleep(jeda);
+      }
       continue;
     }
     terakhir = blob;
     const dur = await measureDuration(blob);
     if (!dur || dur <= maxSec) return blob;      // wajar (atau tak terukur) -> pakai
-    if (a < tries) await sleep(300);             // ngelantur -> ulangi
+    if (a < MAX_COBA) await sleep(400);          // ngelantur -> ulangi
   }
   return terakhir;                               // semua ngelantur -> pakai percobaan terakhir
 }
@@ -999,10 +1130,15 @@ async function concatWav(blobs) {
 }
 // SELALU lewat PCM (decode -> bersihkan -> sambung -> encode WAV),
 // termasuk saat potongannya cuma satu — supaya derau di awal kata ikut dibuang.
-async function mergeAudio(blobs) {
-  const keep = (blobs || []).filter(Boolean);
+async function mergeAudio(blobs, jenisList) {
+  const keep = [], jenis = [];
+  (blobs || []).forEach((b, i) => {
+    if (!b) return;
+    keep.push(b);
+    jenis.push((jenisList && jenisList[i]) || "kalimat");   // daftar jenis ikut disaring
+  });
   if (!keep.length) throw new Error("Tidak ada audio yang berhasil dibuat.");
-  try { return { blob: await joinPcmPad(keep), ext: "wav" }; }
+  try { return { blob: await joinPcmPad(keep, jenis), ext: "wav" }; }
   catch {
     // cadangan kalau Web Audio tidak tersedia / gagal mendekode
     if (keep.length === 1) return { blob: keep[0], ext: "wav" };
@@ -1025,12 +1161,12 @@ $("tts-go").addEventListener("click", async () => {
   try {
     const blobs = await runPool(
       chunks,
-      (c) => speechChunk(c, voiceBody),
-      CONCURRENCY,
+      (c) => speechChunk(c.teks, voiceBody, prog),
+      LAJU.maksParalel,
       (done, tot) => prog.set(4 + (done / tot) * 90)
     );
     prog.set(96, "Merapikan & menggabungkan…");
-    const { blob } = await mergeAudio(blobs);
+    const { blob } = await mergeAudio(blobs, jenisChunk(chunks));
     const hasil = await finalize(blob, "voicepromax-tts", prog);
     const out = $("tts-out");
     out.innerHTML = `<label class="field">Hasil</label>` + doneCard("Suara Sudah Jadi");
@@ -1052,7 +1188,7 @@ $("expr-go").addEventListener("click", async () => {
   try {
     const body = { response_format: "wav", ...resolveVoice($("expr-voice").value) };
     prog.set(35);
-    const raw = await speechChunk(text, body);
+    const raw = await speechChunk(text, body, prog);
     prog.set(90, "Merapikan…");
     const { blob } = await mergeAudio([raw]);
     const hasil = await finalize(blob, "voicepromax-ekspresi", prog);
@@ -1098,9 +1234,19 @@ function encodeWav(samples, sampleRate) {
 //   ratakan kekerasan tiap potongan -> sisipkan hening 0,3 detik -> batasi puncak -1 dBFS.
 // TIDAK ada pemangkasan hening, deteksi awal kata, atau tapis frekuensi:
 // pemangkasan itulah yang membuat kalimat terdengar tercekat dan tidak mengalir.
-const GAP_SEC = 0.30;                    // = _concat(gap=0.3)
+// Jeda sambungan mengikuti JENIS batas, bukan satu angka untuk semua.
+// Angka 0,3 detik yang lama dipakai di mana saja — termasuk di tengah kalimat —
+// dan itu terdengar seperti ucapan yang tersendat.
+const GAP = {
+  lanjut: 0.07,     // tengah kalimat: hampir menyambung
+  kalimat: 0.20,    // antar kalimat
+  paragraf: 0.45,   // antar paragraf
+  giliran: 0.35,    // antar giliran bicara (podcast / buku audio)
+};
 const TARGET_RMS = Math.pow(10, -20 / 20);  // -20 dBFS, patokan bicara
 const MAX_GAIN = Math.pow(10, 20 / 20);     // jangan dorong lebih dari +20 dB
+const GAIN_AKHIR_MAKS = Math.pow(10, 8 / 20);  // normalisasi akhir: maks ±8 dB
+const COCOK_MAKS = Math.pow(10, 3 / 20);    // penyamaan antar potongan: maks ±3 dB
 const PEAK_CEIL = Math.pow(10, -1 / 20);    // -1 dBFS
 
 function removeDC(buf) {
@@ -1132,13 +1278,63 @@ function gatedRms(x, sr) {
   let s = 0; for (const v of pakai) s += v * v;
   return Math.sqrt(s / pakai.length);
 }
-// = _loudness_normalize(): dorong ke -20 dBFS, maksimal +20 dB.
-function loudnessNormalize(x, sr) {
+// Dorong ke -20 dBFS, tapi dengan batas penguatan yang bisa diatur.
+function loudnessNormalize(x, sr, maxGain = MAX_GAIN) {
   const r = gatedRms(x, sr);
   if (r < 1e-6) return x;
-  const gain = Math.min(TARGET_RMS / r, MAX_GAIN);
+  const gain = Math.min(maxGain, Math.max(1 / maxGain, TARGET_RMS / r));
   if (Math.abs(gain - 1) > 0.01) for (let i = 0; i < x.length; i++) x[i] *= gain;
   return x;
+}
+// Samakan level antar potongan SECUKUPNYA saja (maks ±3 dB) ke level tengah.
+// Versi lama memaksa SETIAP potongan tepat -20 dBFS: bisikan jadi sekeras
+// bentakan, dan dinamika alami hilang — ikut membuat hasil terasa "datar".
+function cocokkanLevel(parts, sr) {
+  const rms = parts.map((p) => gatedRms(p, sr));
+  const sah = rms.filter((r) => r > 1e-5).slice().sort((a, b) => a - b);
+  if (!sah.length) return;
+  const tengah = sah[Math.floor(sah.length / 2)];
+  parts.forEach((p, i) => {
+    if (rms[i] <= 1e-5) return;
+    const g = Math.min(COCOK_MAKS, Math.max(1 / COCOK_MAKS, tengah / rms[i]));
+    if (Math.abs(g - 1) > 0.02) for (let k = 0; k < p.length; k++) p[k] *= g;
+  });
+}
+// Batas suara: buang hening BERLEBIH di kedua ujung potongan.
+// Model biasanya menyisipkan 0,2–0,5 detik hening di awal & akhir tiap potongan.
+// Karena dulu tidak dipangkas, hening itu BERTUMPUK dengan jeda 0,3 detik:
+// total bisa >1 detik di tengah paragraf. Ini penyebab terbesar "patah-patah".
+// Sengaja konservatif: bantalan 60 ms disisakan, dan kalau hasil pangkasan
+// terlalu banyak (>60%) pemangkasan dibatalkan agar tidak ada suku kata hilang.
+function batasSuara(x, sr) {
+  const win = Math.max(1, Math.round(sr * 0.01));
+  const n = Math.floor(x.length / win);
+  if (n < 8) return [0, x.length];
+  const env = new Float32Array(n);
+  for (let f = 0; f < n; f++) {
+    let s = 0; const o = f * win;
+    for (let i = 0; i < win; i++) { const v = x[o + i]; s += v * v; }
+    env[f] = Math.sqrt(s / win);
+  }
+  const urut = Array.from(env).sort((a, b) => a - b);
+  const dasar = urut[Math.floor(n * 0.10)] || 0;   // perkiraan lantai derau
+  const puncak = urut[n - 1] || 0;
+  if (puncak < 2e-4) return [0, x.length];          // nyaris senyap -> jangan diapa-apakan
+  const ambang = Math.max(dasar * 3, puncak * 0.03, 1e-4);
+  let a = 0, b = n - 1;
+  while (a < n && env[a] < ambang) a++;
+  while (b > a && env[b] < ambang) b--;
+  if (a >= n) return [0, x.length];
+  // Pengaman pakai ukuran ABSOLUT, bukan rasio: potongan pendek yang diapit
+  // hening panjang (misal "Ya." di dialog) justru paling butuh dipangkas, dan
+  // pengaman berbasis rasio malah melewatkannya.
+  const pad = Math.round(sr * 0.06);
+  const maksBuang = Math.round(sr * 1.5);                     // maks 1,5 s per ujung
+  const awal = Math.max(0, Math.min(a * win - pad, maksBuang));
+  const akhir = Math.min(x.length, Math.max((b + 1) * win + pad, x.length - maksBuang));
+  const minSisa = Math.min(x.length, Math.round(sr * 0.12));  // sisa harus masuk akal
+  if (akhir - awal < minSisa) return [0, x.length];
+  return [awal, akhir];
 }
 function peakLimit(x, ceil = PEAK_CEIL) {
   let peak = 0; for (let i = 0; i < x.length; i++) { const v = Math.abs(x[i]); if (v > peak) peak = v; }
@@ -1191,28 +1387,40 @@ async function decodeMono(blobs) {
   return { parts, sr };
 }
 
-async function joinPcmPad(blobs) {
+async function joinPcmPad(blobs, jenisList) {
   const { parts, sr } = await decodeMono(blobs);
   const rapikan = $("tidy") && $("tidy").checked;
-  let siap = parts.map((p) => {
+  const siap = [], jenis = [];
+  parts.forEach((p, i) => {
     let x = p;
+    // Pangkas hening berlebih di kedua ujung — selalu, karena inilah yang
+    // membuat jeda antar potongan menumpuk dan terdengar tersendat.
+    const [a, b] = batasSuara(x, sr);
+    if (b > a) x = x.subarray(a, b);
+    // Opsi "Rapikan otomatis" tetap ada untuk kasus derau/letupan yang keras.
     if (rapikan) { const s = speechStart(x, sr); if (s > 0) x = x.subarray(s); }
+    if (x.length <= sr * 0.02) return;
     removeDC(x); edgeFade(x, sr);
-    return x;
-  }).filter((p) => p.length > sr * 0.02);
+    siap.push(x);
+    jenis.push((jenisList && jenisList[i]) || "kalimat");
+  });
   if (!siap.length) throw new Error("Audio kosong.");
 
-  // Satu potongan: biarkan apa adanya, persis seperti eng.generate() di versi Python.
-  if (siap.length === 1) return encodeWav(peakLimit(siap[0]), sr);
+  // Satu potongan: cukup ratakan kekerasan dengan lembut lalu batasi puncak.
+  if (siap.length === 1) return encodeWav(peakLimit(loudnessNormalize(siap[0], sr, GAIN_AKHIR_MAKS)), sr);
 
-  siap.forEach((p) => loudnessNormalize(p, sr));
-  const gap = Math.round(sr * GAP_SEC);
+  cocokkanLevel(siap, sr);   // rapatkan level antar potongan, tanpa memampatkan dinamika
+
+  // Jeda tiap sambungan sesuai jenis batasnya.
+  const gaps = siap.map((_, i) =>
+    i === siap.length - 1 ? 0 : Math.round(sr * (GAP[jenis[i]] != null ? GAP[jenis[i]] : GAP.kalimat)));
   let total = 0;
-  siap.forEach((p, i) => { total += p.length + (i ? gap : 0); });
+  siap.forEach((p, i) => { total += p.length + gaps[i]; });
   const out = new Float32Array(total);
   let o = 0;
-  siap.forEach((p, i) => { if (i) o += gap; out.set(p, o); o += p.length; });
-  return encodeWav(peakLimit(out), sr);
+  siap.forEach((p, i) => { out.set(p, o); o += p.length + gaps[i]; });
+  // Normalisasi sekali di akhir, atas audio utuh -> tidak ada level yang "memompa".
+  return encodeWav(peakLimit(loudnessNormalize(out, sr, GAIN_AKHIR_MAKS)), sr);
 }
 // Siapkan audio referensi — setelan pabrik (= _ref_codes di higgs_engine.py):
 // mono, dipotong ke REF_MAX_SEC detik pertama, TANPA dibersihkan apa pun.
@@ -1354,12 +1562,12 @@ $("clone-go").addEventListener("click", async () => {
     const chunks = splitIntoChunks(text);
     const blobs = await runPool(
       chunks,
-      (c) => speechChunk(c, voiceBody),
-      2,
+      (c) => speechChunk(c.teks, voiceBody, prog),
+      2,                                   // ref_audio berat -> tetap dibatasi 2
       (done, tot) => prog.set(6 + (done / tot) * 88)
     );
     prog.set(96, "Merapikan & menggabungkan…");
-    const { blob } = await mergeAudio(blobs);
+    const { blob } = await mergeAudio(blobs, jenisChunk(chunks));
     const hasil = await finalize(blob, "voicepromax-kloning", prog);
     const out = $("clone-out");
     out.innerHTML = `<label class="field">Hasil</label>` + doneCard("Kloning Sudah Jadi");
@@ -1400,37 +1608,43 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix, doneLabe
 
   // Giliran yang panjang tetap dipecah, tapi potongannya digabung lagi per giliran.
   const jobs = [];
-  turns.forEach((t, ti) => splitIntoChunks(t.text).forEach((c) => jobs.push({ ti, c })));
+  turns.forEach((t, ti) =>
+    splitIntoChunks(t.text).forEach((c) => jobs.push({ ti, c: c.teks, jenis: c.jenis })));
   const pakaiSuaraSendiri = speakers.some((sp) => sp && sp.ref_audio);
-  const conc = pakaiSuaraSendiri ? 2 : CONCURRENCY;   // ref_audio berat, jangan terlalu paralel
+  const conc = pakaiSuaraSendiri ? 2 : LAJU.maksParalel;   // ref_audio berat, jangan terlalu paralel
 
   const out = $(outId);
   try {
     prog.set(5, "Suara sedang dibuat…");
     const results = await runPool(
       jobs,
-      (j) => speechChunk(j.c, { response_format: "wav", ...(speakers[turns[j.ti].speaker] || speakers[0] || {}) })
+      (j) => speechChunk(j.c, { response_format: "wav", ...(speakers[turns[j.ti].speaker] || speakers[0] || {}) }, prog)
                .catch(() => null),
       conc,
       (done, tot) => prog.set(5 + (done / tot) * 88)
     );
     prog.set(95, "Merapikan & menggabungkan…");
 
-    const perTurn = turns.map(() => ({ blobs: [], texts: [] }));
-    results.forEach((b, k) => { perTurn[jobs[k].ti].blobs.push(b); perTurn[jobs[k].ti].texts.push(jobs[k].c); });
+    const perTurn = turns.map(() => ({ blobs: [], texts: [], jenis: [] }));
+    results.forEach((b, k) => {
+      const t = perTurn[jobs[k].ti];
+      t.blobs.push(b); t.texts.push(jobs[k].c); t.jenis.push(jobs[k].jenis);
+    });
 
     const semua = [], semuaTeks = [];
     const segs = document.createElement("div");
     for (let i = 0; i < turns.length; i++) {
       const { speaker, text } = turns[i];
-      const ok = [], okTeks = [];
-      perTurn[i].blobs.forEach((b, k) => { if (b) { ok.push(b); okTeks.push(perTurn[i].texts[k]); } });
+      const ok = [], okTeks = [], okJenis = [];
+      perTurn[i].blobs.forEach((b, k) => {
+        if (b) { ok.push(b); okTeks.push(perTurn[i].texts[k]); okJenis.push(perTurn[i].jenis[k]); }
+      });
       const d = document.createElement("div"); d.className = "seg";
       if (!ok.length) {
         d.innerHTML = `<div class="txt" style="color:var(--danger)">Speaker ${speaker}: gagal dibuat.</div>`;
         segs.appendChild(d); continue;
       }
-      const { blob } = await mergeAudio(ok);
+      const { blob } = await mergeAudio(ok, okJenis);
       semua.push(blob); semuaTeks.push(text);
       d.innerHTML = `<div class="who">Speaker ${speaker}</div><div class="txt">${text.replace(/</g, "&lt;")}</div>` +
                     `<audio controls src="${URL.createObjectURL(blob)}"></audio>`;
@@ -1438,7 +1652,8 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix, doneLabe
     }
     if (!semua.length) throw new Error("Tidak ada audio yang berhasil dibuat.");
 
-    const full = await mergeAudio(semua);
+    // Antar giliran bicara: jeda percakapan (0,35 s), bukan jeda antar kalimat.
+    const full = await mergeAudio(semua, semua.map(() => "giliran"));
     const hasil = await finalize(full.blob, `voicepromax-${prefix}`, prog);
     out.innerHTML = `<label class="field">Hasil</label>` + doneCard(doneLabel);
     out.appendChild(audioBlockFromBlob(hasil.blob, hasil.name));
@@ -1466,7 +1681,7 @@ $("batch-go").addEventListener("click", async () => {
   const v = resolveVoice($("batch-voice").value);
   for (let i = 0; i < lines.length; i++) {
     try {
-      const raw = await speechChunk(lines[i], { response_format: "wav", ...v });
+      const raw = await speechChunk(lines[i], { response_format: "wav", ...v }, prog);
       const { blob } = await mergeAudio([raw]);
       const hasil = await finalize(blob, `voicepromax-batch-${i + 1}`);
       const d = document.createElement("div"); d.className = "seg";
