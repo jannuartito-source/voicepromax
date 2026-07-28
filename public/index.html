@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>Sedang dalam perbaikan — Voice Pro Max</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<style>
+  /* Warna & tipografi mengikuti Voice Pro Max, supaya halaman ini terasa
+     bagian dari layanan yang sama — bukan halaman error asing. */
+  :root {
+    --bg: #0b1220; --panel: #121a2b; --panel-2: #0f1626;
+    --line: rgba(255,255,255,.09);
+    --text: #e6edf7; --muted: #93a1b8;
+    --sky: #38bdf8; --sky-2: #7dd3fc; --sky-d: #0ea5e9;
+    --ok: #34d399;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    padding: 28px 20px; line-height: 1.6;
+    /* cahaya lembut di belakang kartu, sewarna aksen merek */
+    background-image: radial-gradient(60% 45% at 50% 0%, rgba(14,165,233,.14), transparent 70%);
+  }
+
+  .kartu {
+    width: 100%; max-width: 520px; text-align: center;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 16px; padding: 40px 32px 34px;
+    box-shadow: 0 20px 50px rgba(0,0,0,.35);
+  }
+  @media (max-width: 420px) { .kartu { padding: 32px 20px 26px; } }
+
+  .merek {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 13px; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 26px;
+  }
+
+  /* ---- Tanda khas halaman ini: gelombang suara yang sedang senyap ----
+     Aplikasi ini soal suara, jadi keadaan "sedang berhenti" paling jujur
+     digambarkan sebagai bentuk gelombang yang mendatar. Satu denyut lambat
+     menyapu dari kiri ke kanan: sistemnya diam, tapi masih hidup. */
+  .gelombang {
+    display: flex; align-items: center; justify-content: center;
+    gap: 5px; height: 84px; margin: 0 0 30px;
+  }
+  .gelombang span {
+    width: 5px; height: 6px; border-radius: 99px;
+    background: linear-gradient(180deg, var(--sky-2), var(--sky-d));
+    opacity: .3;
+    animation: denyut 2.8s ease-in-out infinite;
+    will-change: transform, opacity;
+  }
+  /* Tiap batang tertinggal sedikit dari batang sebelumnya -> denyut berjalan. */
+  @keyframes denyut {
+    0%, 62%, 100% { transform: scaleY(1);  opacity: .3; }
+    31%           { transform: scaleY(7);  opacity: 1;  }
+  }
+  /* Batang tengah naik paling tinggi, jadi denyutnya berbentuk busur. */
+  .gelombang span.tinggi { animation-name: denyutTinggi; }
+  @keyframes denyutTinggi {
+    0%, 62%, 100% { transform: scaleY(1);   opacity: .3; }
+    31%           { transform: scaleY(11);  opacity: 1;  }
+  }
+
+  h1 {
+    font-size: clamp(1.35rem, 4.6vw, 1.7rem); font-weight: 800;
+    letter-spacing: -.02em; margin: 0 0 12px;
+  }
+  .pesan { color: var(--muted); font-size: 15px; margin: 0 auto 26px; max-width: 40ch; }
+  .pesan b { color: var(--text); font-weight: 600; }
+
+  /* Hitung mundur dibuat tenang: informasi, bukan hiasan. */
+  .mundur {
+    display: inline-flex; align-items: center; gap: 9px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 99px; padding: 9px 16px;
+    font-size: 14px; color: var(--muted); font-variant-numeric: tabular-nums;
+  }
+  .mundur .titik {
+    width: 7px; height: 7px; border-radius: 99px; background: var(--sky);
+    box-shadow: 0 0 0 3px rgba(56,189,248,.18);
+    animation: kedip 2s ease-in-out infinite;
+  }
+  @keyframes kedip { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  .mundur b { color: var(--text); font-weight: 600; }
+  .mundur.siap { color: var(--ok); border-color: rgba(52,211,153,.35); }
+  .mundur.siap .titik { background: var(--ok); box-shadow: 0 0 0 3px rgba(52,211,153,.18); animation: none; }
+
+  .aksi { margin: 26px 0 0; }
+  button {
+    font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px; padding: 11px 20px;
+    transition: border-color .18s, background .18s;
+  }
+  button:hover { border-color: var(--sky); }
+  button:focus-visible { outline: 2px solid var(--sky); outline-offset: 3px; }
+  button.utama {
+    background: linear-gradient(135deg, var(--sky-d), var(--sky));
+    color: #04121f; border: none; box-shadow: 0 2px 12px rgba(14,165,233,.3);
+  }
+  .catatan { color: var(--muted); font-size: 12.5px; margin: 22px 0 0; opacity: .8; }
+
+  /* Ada orang yang pusing melihat gerakan. Hormati setelan sistemnya. */
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    .gelombang span { opacity: .45; }
+    .gelombang span.tinggi { height: 10px; }
+  }
+</style>
+</head>
+<body>
+  <main class="kartu">
+    <p class="merek">🎙️ Voice Pro Max</p>
+
+    <!-- Batang diisi oleh skrip supaya jumlahnya bisa menyesuaikan lebar layar. -->
+    <div class="gelombang" id="gelombang" aria-hidden="true"></div>
+
+    <h1>Server sedang dalam perbaikan</h1>
+    <p class="pesan">
+      Akan aktif lagi setelah <b>21.00 WIB</b>.<br />
+      Terima kasih sudah menunggu.
+    </p>
+
+    <!-- Hitung mundur diumumkan sebagai status, bukan dibacakan tiap detik. -->
+    <div class="mundur" id="mundur" role="status" aria-live="polite">
+      <span class="titik" aria-hidden="true"></span>
+      <span id="teksMundur">Menghitung sisa waktu…</span>
+    </div>
+
+    <div class="aksi">
+      <button type="button" id="muatUlang" class="utama">Coba muat ulang</button>
+    </div>
+
+    <p class="catatan">Halaman ini memuat ulang sendiri saat waktunya tiba.</p>
+  </main>
+
+<script>
+// ============================ PENGATURAN ============================
+// Ubah dua angka ini saja kalau jadwalnya bergeser.
+const JAM_AKTIF   = 21;   // 21.00
+const MENIT_AKTIF = 0;
+const ZONA_WIB    = 7;    // WIB = UTC+7
+// ====================================================================
+
+const $ = (id) => document.getElementById(id);
+
+// ---- gelombang: jumlah batang menyesuaikan lebar layar ----
+function gambarGelombang() {
+  const host = $("gelombang");
+  const jumlah = Math.min(29, Math.max(15, Math.floor(host.clientWidth / 11)) | 1); // selalu ganjil
+  if (host.childElementCount === jumlah) return;
+  host.innerHTML = "";
+  const tengah = (jumlah - 1) / 2;
+  for (let i = 0; i < jumlah; i++) {
+    const b = document.createElement("span");
+    // Makin dekat ke tengah, makin tinggi lonjakannya -> denyut berbentuk busur.
+    if (Math.abs(i - tengah) <= jumlah * 0.17) b.className = "tinggi";
+    // Jeda bertingkat dari tepi kiri: inilah yang membuat denyut terlihat berjalan.
+    b.style.animationDelay = (i * 0.055).toFixed(3) + "s";
+    host.appendChild(b);
+  }
+}
+
+// ---- kapan jam aktif berikutnya, dihitung dari sisi WIB bukan zona pengunjung ----
+// Getter UTC dipakai atas waktu yang sudah digeser +7 jam, jadi hasilnya sama
+// baik pengunjung ada di Jakarta, Makassar, maupun luar negeri.
+function waktuAktif() {
+  const sekarang = Date.now();
+  const wib = new Date(sekarang + ZONA_WIB * 3600000);
+  const target = Date.UTC(
+    wib.getUTCFullYear(), wib.getUTCMonth(), wib.getUTCDate(),
+    JAM_AKTIF, MENIT_AKTIF, 0
+  ) - ZONA_WIB * 3600000;
+  return { sekarang, target };
+}
+
+const dua = (n) => String(n).padStart(2, "0");
+function ejaSisa(ms) {
+  const total = Math.floor(ms / 1000);
+  const j = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), d = total % 60;
+  if (j > 0) return `${j} jam ${dua(m)} menit`;
+  if (m > 0) return `${m} menit ${dua(d)} detik`;
+  return `${d} detik`;
+}
+
+let sudahMuatUlang = false;
+function perbarui() {
+  const { sekarang, target } = waktuAktif();
+  const sisa = target - sekarang;
+  const kotak = $("mundur"), teks = $("teksMundur");
+
+  if (sisa > 0) {
+    teks.textContent = `Perkiraan aktif dalam ${ejaSisa(sisa)}`;
+    kotak.classList.remove("siap");
+    return;
+  }
+
+  // Waktunya sudah lewat. Jangan menggeser target ke hari berikutnya — itu
+  // membuat pengunjung menunggu 24 jam untuk sesuatu yang mungkin sudah selesai.
+  kotak.classList.add("siap");
+  teks.textContent = "Waktunya sudah lewat — mencoba menyambung kembali…";
+  if (!sudahMuatUlang) {
+    sudahMuatUlang = true;
+    setTimeout(() => location.reload(), 4000);
+  }
+}
+
+$("muatUlang").addEventListener("click", () => location.reload());
+addEventListener("resize", gambarGelombang);
+
+gambarGelombang();
+perbarui();
+setInterval(perbarui, 1000);
+</script>
+</body>
+</html>
