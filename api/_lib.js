@@ -29,6 +29,21 @@ async function kv(parts) {
   if (!r.ok) throw new Error("KV error " + r.status);
   return (await r.json()).result;
 }
+
+// Beberapa perintah sekaligus dalam SATU perjalanan jaringan.
+// Tanpa ini, satu pemeriksaan kuota butuh 4-5 kali bolak-balik ke Redis dan
+// itu menambah ratusan milidetik pada setiap potongan teks.
+async function kvPipe(cmds) {
+  if (!kvReady || !cmds.length) return [];
+  const r = await fetch(`${KV_URL}/pipeline`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${KV_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(cmds.map((c) => c.map(String))),
+  });
+  if (!r.ok) throw new Error("KV pipeline error " + r.status);
+  const j = await r.json();
+  return (Array.isArray(j) ? j : []).map((x) => (x && typeof x === "object" && "result" in x ? x.result : null));
+}
 const adKey = (u) => `adfree:${String(u || "").trim().toLowerCase()}`;
 
 // Tandai username bebas iklan selama N hari (pakai TTL Redis -> otomatis hangus).
@@ -72,7 +87,12 @@ export function graceInfo(joinedTs) {
 // ---------- user & login (stateless, cocok untuk serverless) ----------
 // Baca users.txt. Baris boleh diberi tanda "*" di depan username = VIP (bebas iklan selamanya).
 // Contoh:  *budi:passbudi   -> user budi tidak pernah kena iklan.
+// users.txt dibaca ulang dari disk pada SETIAP pemeriksaan token, dan requireAuth()
+// + isVip() memanggilnya dua kali per permintaan. Isinya hanya berubah saat deploy
+// ulang, jadi cukup dibaca sekali per instans fungsi (hangus 60 detik untuk jaga-jaga).
+let _usersCache = null, _usersSampai = 0;
 function parseUsers() {
+  if (_usersCache && Date.now() < _usersSampai) return _usersCache;
   const rows = [];
   try {
     const txt = fs.readFileSync(USERS_FILE, "utf8");
@@ -88,6 +108,7 @@ function parseUsers() {
       if (user) rows.push({ user, pass, vip });
     }
   } catch {}
+  _usersCache = rows; _usersSampai = Date.now() + 60000;
   return rows;
 }
 export function readUsers() {
@@ -132,7 +153,11 @@ export function requireAuth(req, res) {
 }
 
 // ---------- preset suara ----------
+// Daftar file preset tidak pernah berubah selama fungsi hidup. Sebelumnya
+// readdirSync() dijalankan pada setiap permintaan /api/speech dan /api/voices.
+let _presetCache = null;
 export function listPresets() {
+  if (_presetCache) return _presetCache;
   let files = [];
   try { files = fs.readdirSync(VOICES_DIR); } catch { return []; }
   const out = [];
@@ -142,16 +167,49 @@ export function listPresets() {
     const base = path.basename(f, ext);
     out.push({ name: base, file: f, ext, hasText: fs.existsSync(path.join(VOICES_DIR, base + ".txt")) });
   }
-  return out.sort((a, b) => a.name.localeCompare(b.name));
+  _presetCache = out.sort((a, b) => a.name.localeCompare(b.name));
+  return _presetCache;
 }
+// Hasil base64 preset juga disimpan. Mengubah WAV 20 detik menjadi base64 pada
+// setiap potongan teks adalah pekerjaan berat yang hasilnya selalu sama persis:
+// satu teks 5.000 karakter memicu ±25 kali penyandian ulang file yang identik.
+const _refCache = new Map();
 export function presetAsRef(name) {
+  if (_refCache.has(name)) return _refCache.get(name);
   const p = listPresets().find((x) => x.name === name);
   if (!p) return null;
   const buf = fs.readFileSync(path.join(VOICES_DIR, p.file));
   const dataUri = `data:${AUDIO_EXT[p.ext] || "audio/mpeg"};base64,${buf.toString("base64")}`;
   let refText = "";
   if (p.hasText) { try { refText = fs.readFileSync(path.join(VOICES_DIR, p.name + ".txt"), "utf8").trim(); } catch {} }
-  return { ref_audio: dataUri, ref_text: refText };
+  const ref = { ref_audio: dataUri, ref_text: refText };
+  _refCache.set(name, ref);
+  return ref;
+}
+
+// ---------- singgahan audio referensi ----------
+// ref_audio 20 detik ≈ 1,3 MB base64, dan dulu ikut TIAP potongan teks: satu
+// pekerjaan kloning 5.000 karakter mengunggah ±32 MB yang isinya sama persis.
+// Sekarang klien cukup mengirim sidik jarinya (ref_id); audio penuh hanya perlu
+// menyertai beberapa potongan pertama, sekadar untuk "mengisi" instans yang
+// melayani. Disimpan di memori instans, bukan di Redis: ukurannya terlalu besar
+// untuk Redis dan isinya memang hanya berguna selama satu pekerjaan berjalan.
+const REF_MAKS = Math.max(1, Number(process.env.REF_CACHE_MAX || 4));
+const _refAudio = new Map();          // ref_id -> { ref_audio, ref_text }
+
+export function refAmbil(id) {
+  if (!id) return null;
+  const v = _refAudio.get(id);
+  if (!v) return null;
+  _refAudio.delete(id); _refAudio.set(id, v);   // yang baru dipakai = paling akhir dibuang
+  return v;
+}
+export function refSimpan(id, ref_audio, ref_text) {
+  if (!id || !ref_audio) return;
+  _refAudio.delete(id);
+  _refAudio.set(id, { ref_audio, ref_text: ref_text || "" });
+  // Dibatasi jumlahnya supaya memori fungsi tidak menggelembung.
+  while (_refAudio.size > REF_MAKS) _refAudio.delete(_refAudio.keys().next().value);
 }
 
 // ---------- pengaman rate limit (429) ----------
@@ -159,12 +217,19 @@ export function presetAsRef(name) {
 // 5xx = gangguan sementara di sisi Boson. Sisanya (400/401/413) permanen:
 // mengulang hanya memperparah antrean.
 const STATUS_ULANG = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
-const MAX_ULANG = Math.max(0, Number(process.env.BOSON_MAX_RETRY ?? 4));
+// Dulu 4 (= 5 percobaan). Karena halaman JUGA mengulang sampai 5x, satu potongan
+// bisa berubah menjadi 25 panggilan ke Boson. Halaman sudah punya gerbang laju
+// + masa dingin global yang jauh lebih pintar (menahan SELURUH antrean, bukan
+// satu permintaan), jadi tugas server cukup menyerap gangguan sekejap saja.
+const MAX_ULANG = Math.max(0, Number(process.env.BOSON_MAX_RETRY ?? 1));
 const JEDA_AWAL_MS = Math.max(200, Number(process.env.BOSON_RETRY_BASE_MS ?? 900));
 const JEDA_MAKS_MS = Math.max(1000, Number(process.env.BOSON_RETRY_MAX_MS ?? 12000));
 // Fungsi Vercel dibatasi 60 detik (vercel.json). Sisakan ruang untuk generasi itu
 // sendiri, jadi total waktu menunggu tidak boleh mendekati batas tersebut.
-const ANGGARAN_ULANG_MS = Math.max(2000, Number(process.env.BOSON_RETRY_BUDGET_MS ?? 40000));
+// Dulu 40 detik. Fungsi yang tidur 40 detik tetap ditagih Vercel sebagai waktu
+// jalan, padahal tidak mengerjakan apa pun. Lebih murah menyerah cepat dan
+// membiarkan halaman menjadwalkan ulang lewat gerbangnya sendiri.
+const ANGGARAN_ULANG_MS = Math.max(2000, Number(process.env.BOSON_RETRY_BUDGET_MS ?? 12000));
 
 const tidur = (ms) => new Promise((r) => setTimeout(r, ms));
 // Jitter penuh: acak 70%–130% supaya banyak permintaan tidak bangun serentak
@@ -253,7 +318,11 @@ export async function synth({ input, voice, preset, ref_audio, ref_text, respons
 // ---------- pembatas laju per pengguna (opsional, butuh KV) ----------
 // Aktif hanya kalau RATE_LIMIT_PER_MIN > 0 dan KV terkonfigurasi. Gunanya menahan
 // satu pengguna agar tidak menghabiskan kuota Boson untuk semua orang.
-const LIMIT_PER_MIN = Math.max(0, Number(process.env.RATE_LIMIT_PER_MIN || 0));
+// Dulu bawaannya 0 = MATI, sehingga satu-satunya rem adalah kode di browser —
+// dan itu bisa dilewati total hanya dengan memanggil /api/speech langsung.
+// 90/menit tidak mengganggu pemakaian wajar (teks panjang pun di bawah itu),
+// tapi menghentikan skrip yang menghantam endpoint terus-menerus.
+const LIMIT_PER_MIN = Math.max(0, Number(process.env.RATE_LIMIT_PER_MIN ?? 90));
 export async function cekLaju(kunci) {
   if (!LIMIT_PER_MIN || !kvReady || !kunci) return { ok: true };
   const jendela = Math.floor(Date.now() / 60000);
@@ -267,4 +336,158 @@ export async function cekLaju(kunci) {
     }
   } catch { return { ok: true }; }   // KV bermasalah -> jangan halangi pengguna
   return { ok: true };
+}
+
+// ================== KUOTA KARAKTER (gratis & masa percobaan) ==================
+// Tiga pagar yang berbeda tugasnya:
+//   1. perRequest  — batas satu kali kirim (dihitung di browser & di sini).
+//   2. burst       — 10.000 karakter; kalau lewat, istirahat 30 menit.
+//   3. weekly      — 65.000 karakter per pekan, selalu direset hari Senin 00:00.
+// VIP (tanda "*" di users.txt) tidak pernah tersentuh ketiganya.
+export const QUOTA = {
+  perRequest: Math.max(1, Number(process.env.QUOTA_PER_REQUEST || 5000)),
+  burst: Math.max(1, Number(process.env.QUOTA_BURST || 10000)),
+  burstCooldown: Math.max(60, Number(process.env.QUOTA_BURST_COOLDOWN_SEC || 1800)), // 30 menit
+  weekly: Math.max(1, Number(process.env.QUOTA_WEEKLY || 65000)),
+  tzOffset: Number(process.env.QUOTA_TZ_OFFSET ?? 7),   // WIB
+  exemptPaid: process.env.QUOTA_EXEMPT_PAID === "1",    // ikut bebaskan pembeli "Hapus Iklan"
+};
+export const PESAN_BURST = "Tunggu lagi dalam 30 menit, sistem sedang banyak permintaan";
+export const PESAN_WEEKLY = "Batas mingguan sudah habis";
+
+// Senin 00:00 waktu lokal sebagai awal pekan; berakhir Senin berikutnya 00:00.
+// Dihitung dengan getter UTC atas waktu yang sudah digeser, supaya hasilnya
+// tidak ikut berubah mengikuti zona waktu server Vercel.
+export function pekanIni(now = Date.now()) {
+  const off = QUOTA.tzOffset * 3600000;
+  const lokal = new Date(now + off);
+  const jarakKeSenin = (lokal.getUTCDay() + 6) % 7;     // Minggu=6, Senin=0
+  const seninLokal = Date.UTC(lokal.getUTCFullYear(), lokal.getUTCMonth(), lokal.getUTCDate()) - jarakKeSenin * 86400000;
+  const mulai = seninLokal - off;
+  const selesai = mulai + 7 * 86400000;
+  return {
+    label: new Date(seninLokal).toISOString().slice(0, 10),
+    mulai, selesai,
+    sisaDetik: Math.max(60, Math.ceil((selesai - now) / 1000)),
+  };
+}
+
+const kunciKuota = (u) => String(u || "").trim().toLowerCase();
+const kWeek = (u, label) => `q:w:${kunciKuota(u)}:${label}`;
+const kBurst = (u) => `q:b:${kunciKuota(u)}`;
+const kSeen = (u, h) => `q:s:${kunciKuota(u)}:${h}`;
+
+const sidik = (u, teks) =>
+  crypto.createHash("sha1").update(kunciKuota(u) + "\u0000" + String(teks)).digest("base64url").slice(0, 16);
+
+// Siapa yang dibatasi. Gratis & masa percobaan -> dibatasi. VIP -> tidak.
+export async function kenaKuota(username) {
+  if (!username) return true;                       // tamu/IP tetap dibatasi
+  if (isVip(username)) return false;
+  if (QUOTA.exemptPaid && (await isAdFree(username))) return false;
+  return true;
+}
+
+const angka = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
+
+function ringkasan(pekanTerpakai, burstTerpakai, burstTtl, pekan) {
+  return {
+    perRequest: QUOTA.perRequest,
+    weekly: { used: pekanTerpakai, limit: QUOTA.weekly, sisa: Math.max(0, QUOTA.weekly - pekanTerpakai), resetAt: pekan.selesai },
+    burst: {
+      used: burstTerpakai, limit: QUOTA.burst,
+      blockedUntil: burstTerpakai >= QUOTA.burst && burstTtl > 0 ? Date.now() + burstTtl * 1000 : 0,
+    },
+  };
+}
+
+// Hanya membaca — dipakai halaman untuk memeriksa SEBELUM generate dimulai,
+// supaya pengguna tidak mendapat audio setengah jadi saat kuotanya mepet.
+export async function quotaStatus(username) {
+  const dibatasi = await kenaKuota(username);
+  const pekan = pekanIni();
+  if (!dibatasi || !kvReady) {
+    return { limited: dibatasi, enforced: dibatasi && kvReady, ...ringkasan(0, 0, 0, pekan) };
+  }
+  try {
+    const [w, b, ttl] = await kvPipe([
+      ["GET", kWeek(username, pekan.label)],
+      ["GET", kBurst(username)],
+      ["TTL", kBurst(username)],
+    ]);
+    return { limited: true, enforced: true, ...ringkasan(angka(w), angka(b), angka(ttl), pekan) };
+  } catch {
+    return { limited: true, enforced: false, ...ringkasan(0, 0, 0, pekan) };
+  }
+}
+
+// Periksa lalu catat. Dipanggil /api/speech untuk SETIAP potongan teks.
+// Urutannya sengaja "periksa dulu, baru tambah": permintaan yang menembus batas
+// tetap dilayani, yang berikutnya baru ditolak. Kalau dibalik, sebuah teks
+// panjang bisa berhenti di tengah dan menyisakan audio terpotong.
+export async function quotaConsume(username, teks) {
+  const chars = String(teks || "").length;
+  const dibatasi = await kenaKuota(username);
+  if (!dibatasi) return { ok: true, exempt: true };
+  if (!kvReady) return { ok: true, enforced: false };   // KV mati -> jangan halangi
+
+  const pekan = pekanIni();
+  const wKey = kWeek(username, pekan.label), bKey = kBurst(username);
+  const sKey = kSeen(username, sidik(username, teks));
+
+  let baru = true, terpakaiW = 0, terpakaiB = 0, ttlB = 0;
+  try {
+    // SET NX menandai potongan ini "sudah pernah dihitung". Percobaan ulang atas
+    // teks yang sama (lihat pagar anti-ngelantur di halaman) karena itu tidak
+    // memakan kuota dua kali — yang dihitung adalah teks yang diminta pengguna.
+    const [seen, w, b, ttl] = await kvPipe([
+      ["SET", sKey, "1", "NX", "EX", "900"],
+      ["GET", wKey],
+      ["GET", bKey],
+      ["TTL", bKey],
+    ]);
+    baru = seen === "OK";
+    terpakaiW = angka(w); terpakaiB = angka(b); ttlB = angka(ttl);
+  } catch {
+    return { ok: true, enforced: false };
+  }
+
+  // --- pagar mingguan ---
+  if (terpakaiW >= QUOTA.weekly) {
+    return {
+      ok: false, reason: "weekly", message: PESAN_WEEKLY,
+      resetAt: pekan.selesai, retryAfter: pekan.sisaDetik,
+      ...ringkasan(terpakaiW, terpakaiB, ttlB, pekan),
+    };
+  }
+  // --- pagar 30 menit ---
+  if (terpakaiB >= QUOTA.burst) {
+    const sisa = ttlB > 0 ? ttlB : QUOTA.burstCooldown;
+    return {
+      ok: false, reason: "burst", message: PESAN_BURST,
+      resetAt: Date.now() + sisa * 1000, retryAfter: sisa,
+      ...ringkasan(terpakaiW, terpakaiB, ttlB, pekan),
+    };
+  }
+
+  if (!baru || chars <= 0) return { ok: true, retry: !baru };
+
+  try {
+    // Urutan hasil mengikuti urutan perintah — EXPIRE menempati indeks 1.
+    const [wBaru, , bBaru] = await kvPipe([
+      ["INCRBY", wKey, chars],
+      ["EXPIRE", wKey, pekan.sisaDetik + 120],   // hangus sendiri setelah Senin
+      ["INCRBY", bKey, chars],
+    ]);
+    const susulan = [];
+    // Jendela 30 menit dimulai saat pemakaian pertama...
+    if (angka(bBaru) === chars) susulan.push(["EXPIRE", bKey, QUOTA.burstCooldown]);
+    // ...dan disetel ulang tepat saat batas ditembus, supaya jeda yang dijanjikan
+    // ke pengguna benar-benar 30 menit penuh, bukan sisa jendela sebelumnya.
+    else if (angka(bBaru) >= QUOTA.burst && terpakaiB < QUOTA.burst) susulan.push(["EXPIRE", bKey, QUOTA.burstCooldown]);
+    if (susulan.length) await kvPipe(susulan);
+    return { ok: true, ...ringkasan(angka(wBaru), angka(bBaru), QUOTA.burstCooldown, pekan) };
+  } catch {
+    return { ok: true, enforced: false };
+  }
 }
