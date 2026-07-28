@@ -114,6 +114,20 @@
   .done { display: flex; align-items: center; gap: 8px; margin: 2px 0 12px;
     font-size: 15px; font-weight: 700; color: var(--ok); }
 
+  /* penghitung karakter di bawah kanan kotak teks */
+  .cc { display: none; justify-content: flex-end; font-size: 12px; color: var(--muted);
+    margin-top: 6px; font-variant-numeric: tabular-nums; letter-spacing: .01em; }
+  .cc b { font-weight: 700; color: var(--text); }
+  .cc.over, .cc.over b { color: var(--danger); font-weight: 700; }
+
+  /* palang masa tunggu / kuota */
+  .qbar { display: none; gap: 10px; align-items: flex-start; margin: 14px 0 0;
+    padding: 12px 14px; border-radius: 10px; font-size: 13.5px; line-height: 1.55;
+    background: rgba(251,113,133,.09); border: 1px solid rgba(251,113,133,.35); color: var(--danger); }
+  .qbar.show { display: flex; }
+  .qbar b { display: block; font-size: 14px; }
+  .qbar .sub { color: var(--muted); font-size: 12.5px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+
   /* blok suara sendiri di podcast / buku audio */
   .ownvoice { margin-top: 4px; padding: 10px 12px 12px; border-radius: 9px;
     background: rgba(255,255,255,.03); border: 1px dashed var(--line); }
@@ -164,6 +178,16 @@
     </div>
   </div>
 
+  <!-- Modal batas mingguan (65.000 karakter, reset tiap Senin) -->
+  <div class="login" id="week-modal">
+    <div class="box" style="width:360px;text-align:center">
+      <div style="font-size:34px;margin:4px 0 6px">📆</div>
+      <h3 style="margin:0 0 6px">Batas mingguan sudah habis</h3>
+      <p class="hint" id="week-detail" style="margin:0 0 16px"></p>
+      <button class="go" id="week-ok" style="width:100%">Mengerti</button>
+    </div>
+  </div>
+
   <!-- Modal iklan (tampil tiap generate ke-2 untuk yang belum bayar) -->
   <div class="login" id="ad-modal">
     <div class="box" style="width:360px;text-align:center">
@@ -190,9 +214,13 @@
       <select id="fmt"><option value="mp3">mp3</option><option value="wav">wav</option></select>
       <span class="hint" id="cfgHint"></span>
       <span style="flex:1"></span>
+      <span id="quotaBadge" class="hint" style="display:none"></span>
       <button class="ghost" id="removeAdsBtn" style="display:none;border-color:var(--sky);color:var(--sky-2)">✨ Hapus Iklan</button>
       <span id="adFreeBadge" class="hint" style="display:none;color:var(--ok)">✓ Bebas iklan aktif</span>
     </div>
+
+    <!-- Masa tunggu 30 menit; berlaku untuk semua tab sekaligus -->
+    <div class="qbar" id="qbar"></div>
 
     <div class="tabs">
       <button class="tab active" data-tab="tts">TTS</button>
@@ -367,7 +395,7 @@ async function postJSON(path, body, wantBlob) {
   });
   if (!res.ok) {
     let msg = "Gagal (HTTP " + res.status + ").";
-    let needLogin = false, detail = "", retryAfter = null;
+    let needLogin = false, detail = "", retryAfter = null, quota = null, refMissing = false;
     const h = res.headers.get("retry-after");
     if (h) { const n = Number(h); if (isFinite(n)) retryAfter = n; }
     try {
@@ -375,12 +403,14 @@ async function postJSON(path, body, wantBlob) {
       if (j.error) msg = j.error + (j.detail ? " — " + j.detail : "");
       needLogin = Boolean(j.needLogin);
       detail = j.detail || "";
+      quota = j.quota || null;                 // penolakan karena batas pemakaian
+      refMissing = Boolean(j.refMissing);      // server minta audio referensi dikirim ulang
       if (j.retryAfter != null && isFinite(Number(j.retryAfter))) retryAfter = Number(j.retryAfter);
     } catch {}
     if (needLogin) { $("login").classList.add("show"); }  // hanya login web, bukan API key Boson
     // Status HTTP WAJIB ikut terbawa. Tanpa ini pemanggil tidak bisa membedakan
     // 429 (perlu ditunggu lalu diulang) dari 400 (diulang pun tidak akan berhasil).
-    throw Object.assign(new Error(msg), { status: res.status, retryAfter, detail, needLogin });
+    throw Object.assign(new Error(msg), { status: res.status, retryAfter, detail, needLogin, quota, refMissing });
   }
   return wantBlob ? res.blob() : res.json();
 }
@@ -487,7 +517,9 @@ async function init() {
   buildSpeakers("pod-speakers", 2);
   buildSpeakers("book-speakers", 2);
 
+  pasangPenghitung();                  // penghitung karakter di tiap kotak teks
   if (USERNAME) await refreshAdFree(); // segarkan status saat halaman dibuka
+  await refreshKuota();                // sisa jatah & masa tunggu yang masih berjalan
   updateAdUI();
   // Pemeriksaan adblock hanya jalan kalau user SUDAH login dan statusnya gratis.
   maybeAdblockWall();
@@ -528,9 +560,11 @@ async function doLogin() {
     PAID = Boolean(j.paid);
     localStorage.setItem("vpm_token", TOKEN);
     localStorage.setItem("vpm_user", USERNAME);
+    VIP = Boolean(j.vip);
     $("login").classList.remove("show");
     setStatus($("loginErr"), "");
     updateAdUI();
+    refreshKuota();                    // batas mengikuti akun yang baru masuk
     if (PENDING_OFFER) { PENDING_OFFER = false; openOffer(); }
     else maybeAdblockWall();   // adblocker baru diperiksa setelah user masuk
   } catch (e) { setStatus($("loginErr"), e.message, "err"); }
@@ -570,9 +604,194 @@ async function refreshAdFree() {
     const j = await fetch("/api/status?u=" + encodeURIComponent(USERNAME)).then((r) => r.json());
     AD_FREE = Boolean(j.adFree);
     PAID = Boolean(j.paid);
+    VIP = Boolean(j.vip);
   } catch {}
   updateAdUI();
 }
+
+// ================== BATAS KARAKTER & KUOTA PEMAKAIAN ==================
+// Tiga pagar, hanya untuk user gratis & yang masih dalam masa percobaan:
+//   1. 5.000 karakter per sekali kirim  -> penghitung di bawah kanan kotak teks.
+//   2. 10.000 karakter                  -> istirahat 30 menit.
+//   3. 65.000 karakter per pekan        -> tutup sampai Senin 00.00.
+// User VIP tidak melihat penghitung dan tidak pernah tersentuh pagar mana pun.
+const PESAN_TUNGGU = "Tunggu lagi dalam 30 menit, sistem sedang banyak permintaan";
+let VIP = false;
+let LIMITED = true;
+let BATAS_KIRIM = 5000;
+let SISA_PEKAN = Infinity, RESET_PEKAN = 0, JATAH_PEKAN = 65000;
+let TUNGGU_SAMPAI = 0, PEKAN_HABIS = false, KUOTA_STOP = false;
+let KUOTA_SIAP = false;   // status akun belum diketahui -> penghitung belum digambar
+let _timerTunggu = null;
+
+const AREAS = [
+  { ta: "tts-text",    btn: "tts-go",   st: "tts-status"   },
+  { ta: "expr-text",   btn: "expr-go",  st: "expr-status"  },
+  { ta: "clone-text",  btn: "clone-go", st: "clone-status" },
+  { ta: "pod-script",  btn: "pod-go",   st: "pod-status"   },
+  { ta: "book-script", btn: "book-go",  st: "book-status"  },
+  { ta: "batch-text",  btn: "batch-go", st: "batch-status" },
+];
+const SIBUK = new Set();                       // tombol yang sedang menggenerate
+const angkaID = (n) => Number(n).toLocaleString("id-ID");
+const areaDari = (btnId) => AREAS.find((a) => a.btn === btnId);
+
+// ---- penghitung "456/5000 karakter" ----
+function pasangPenghitung() {
+  for (const a of AREAS) {
+    const ta = $(a.ta);
+    if (!ta || $("cc-" + a.ta)) continue;
+    const el = document.createElement("div");
+    el.className = "cc"; el.id = "cc-" + a.ta;
+    ta.insertAdjacentElement("afterend", el);
+    ta.addEventListener("input", () => { gambarPenghitung(a); syncTombol(); });
+  }
+  gambarSemua();
+}
+function gambarPenghitung(a) {
+  const el = $("cc-" + a.ta), ta = $(a.ta);
+  if (!el || !ta) return;
+  if (!KUOTA_SIAP || !LIMITED) { el.style.display = "none"; return; }   // VIP: disembunyikan
+  const n = ta.value.length;
+  el.style.display = "flex";
+  el.classList.toggle("over", n > BATAS_KIRIM);
+  el.innerHTML = `<span><b>${angkaID(n)}</b>/${angkaID(BATAS_KIRIM)} karakter</span>`;
+}
+function gambarSemua() {
+  AREAS.forEach(gambarPenghitung);
+  const b = $("quotaBadge");
+  if (!KUOTA_SIAP || !LIMITED || !isFinite(SISA_PEKAN)) { b.style.display = "none"; return; }
+  b.style.display = "inline";
+  b.style.color = SISA_PEKAN <= 5000 ? "var(--danger)" : "var(--muted)";
+  b.textContent = `Sisa pekan ini ${angkaID(Math.max(0, SISA_PEKAN))} karakter`;
+}
+
+// Satu tempat yang menentukan tombol "Hasilkan" boleh ditekan atau tidak.
+function syncTombol() {
+  const menunggu = TUNGGU_SAMPAI > Date.now();
+  for (const a of AREAS) {
+    const btn = $(a.btn), ta = $(a.ta);
+    if (!btn) continue;
+    if (SIBUK.has(a.btn)) { btn.disabled = true; continue; }
+    const kepanjangan = LIMITED && ta && ta.value.length > BATAS_KIRIM;
+    btn.disabled = Boolean(kepanjangan || (LIMITED && (menunggu || PEKAN_HABIS)));
+  }
+}
+function tandaiSibuk(btnId, on) {
+  if (on) SIBUK.add(btnId); else SIBUK.delete(btnId);
+  syncTombol();
+}
+
+// ---- masa istirahat 30 menit ----
+function tampilTunggu() {
+  const bar = $("qbar");
+  const sisa = TUNGGU_SAMPAI - Date.now();
+  if (sisa <= 0) {
+    clearInterval(_timerTunggu); _timerTunggu = null;
+    TUNGGU_SAMPAI = 0; bar.className = "qbar"; bar.innerHTML = "";
+    syncTombol();
+    return;
+  }
+  const m = Math.floor(sisa / 60000), d = Math.floor((sisa % 60000) / 1000);
+  bar.className = "qbar show";
+  bar.innerHTML = `<span aria-hidden="true">⏳</span><div><b>${PESAN_TUNGGU}</b>` +
+    `<div class="sub">Bisa dipakai lagi dalam ${m}:${String(d).padStart(2, "0")}.</div></div>`;
+}
+function mulaiTunggu(detik) {
+  const sampai = Date.now() + Math.max(1, Number(detik) || 1800) * 1000;
+  if (sampai <= TUNGGU_SAMPAI) return;
+  TUNGGU_SAMPAI = sampai;
+  clearInterval(_timerTunggu);
+  _timerTunggu = setInterval(tampilTunggu, 1000);
+  tampilTunggu(); syncTombol();
+}
+
+// ---- batas mingguan ----
+function tanggalID(ms) {
+  try {
+    return new Date(ms).toLocaleString("id-ID", {
+      weekday: "long", day: "numeric", month: "long",
+      hour: "2-digit", minute: "2-digit", timeZone: "Asia/Jakarta",
+    });
+  } catch { return new Date(ms).toLocaleString("id-ID"); }
+}
+function bukaModalPekan(resetAt, sisa) {
+  if (resetAt) RESET_PEKAN = Number(resetAt);
+  if (sisa != null) SISA_PEKAN = Number(sisa);
+  const habis = !(SISA_PEKAN > 0);
+  PEKAN_HABIS = habis;
+  const kapan = RESET_PEKAN ? `Terbuka lagi ${tanggalID(RESET_PEKAN)} WIB.` : "Terbuka lagi hari Senin.";
+  $("week-detail").textContent = habis
+    ? `Jatah ${angkaID(JATAH_PEKAN)} karakter untuk pekan ini sudah terpakai. ${kapan}`
+    : `Sisa jatah pekan ini tinggal ${angkaID(SISA_PEKAN)} karakter, tidak cukup untuk teks ini. ${kapan}`;
+  $("week-modal").classList.add("show");
+  gambarSemua(); syncTombol();
+}
+$("week-ok").addEventListener("click", () => $("week-modal").classList.remove("show"));
+
+// Terjemahkan penolakan dari server menjadi tampilan yang sesuai.
+function terapkanKuota(q) {
+  if (!q) return;
+  KUOTA_STOP = true;                       // hentikan potongan lain yang masih antre
+  if (q.weekly) { SISA_PEKAN = Number(q.weekly.sisa); JATAH_PEKAN = Number(q.weekly.limit) || JATAH_PEKAN; }
+  if (q.reason === "weekly") bukaModalPekan(q.resetAt, 0);
+  else mulaiTunggu(q.retryAfter);
+  gambarSemua();
+}
+
+async function refreshKuota() {
+  try {
+    const url = "/api/quota" + (TOKEN ? "" : "?u=" + encodeURIComponent(USERNAME || ""));
+    const j = await fetch(url, { headers: TOKEN ? { "x-auth-token": TOKEN } : {} }).then((r) => r.json());
+    VIP = Boolean(j.vip);
+    LIMITED = Boolean(j.limited);
+    BATAS_KIRIM = Number(j.perRequest) || BATAS_KIRIM;
+    if (j.weekly) {
+      SISA_PEKAN = Number(j.weekly.sisa);
+      JATAH_PEKAN = Number(j.weekly.limit) || JATAH_PEKAN;
+      RESET_PEKAN = Number(j.weekly.resetAt) || RESET_PEKAN;
+    }
+    PEKAN_HABIS = LIMITED && !(SISA_PEKAN > 0);
+    const sampai = Number(j.burst && j.burst.blockedUntil) || 0;
+    if (sampai > Date.now()) mulaiTunggu(Math.ceil((sampai - Date.now()) / 1000));
+  } catch {}
+  KUOTA_SIAP = true;
+  gambarSemua(); syncTombol();
+}
+
+// Pemeriksaan SEBELUM satu pun permintaan dikirim. Tujuannya bukan cuma menegakkan
+// aturan, tapi juga menghemat: teks yang pasti ditolak di tengah jalan tidak jadi
+// audio setengah dan tidak menghabiskan panggilan API yang percuma.
+function bolehJalan(btnId, jumlahKarakter) {
+  const a = areaDari(btnId);
+  const st = a ? $(a.st) : null;
+  const n = jumlahKarakter != null ? jumlahKarakter : (a ? $(a.ta).value.trim().length : 0);
+  KUOTA_STOP = false;
+  if (!LIMITED) return true;
+  if (n > BATAS_KIRIM) {
+    if (st) setStatus(st, `Teks ${angkaID(n)} karakter, melebihi batas ${angkaID(BATAS_KIRIM)}. Kurangi ${angkaID(n - BATAS_KIRIM)} karakter dulu.`, "err");
+    return false;
+  }
+  if (TUNGGU_SAMPAI > Date.now()) {
+    if (st) setStatus(st, PESAN_TUNGGU, "err");
+    tampilTunggu();
+    return false;
+  }
+  if (PEKAN_HABIS || n > SISA_PEKAN) { bukaModalPekan(); return false; }
+  return true;
+}
+// Kurangi jatah lokal setelah generate supaya penghitung tetap masuk akal
+// tanpa harus menanyakan server pada setiap potongan.
+function catatPemakaian(n) {
+  if (!LIMITED || !isFinite(SISA_PEKAN)) return;
+  const adaSisa = SISA_PEKAN > 0;
+  SISA_PEKAN = Math.max(0, SISA_PEKAN - n);
+  PEKAN_HABIS = SISA_PEKAN <= 0;
+  gambarSemua(); syncTombol();
+  // Jatah baru saja habis: beritahu sekarang, bukan saat tombol berikutnya ditekan.
+  if (adaSisa && PEKAN_HABIS) setTimeout(() => bukaModalPekan(), 1600);
+}
+// =======================================================================
 
 // ---- Deteksi adblocker (3 sinyal, supaya tidak lolos) ----
 // Diambil otomatis dari kode Adsterra di atas, jadi ikut berubah kalau key-nya diganti.
@@ -857,6 +1076,12 @@ const LAJU = {
 };
 const _antre = [];
 let _jalan = 0, _mulaiTerakhir = 0, _timerLaju = null;
+// Audio referensi cukup dikirim lengkap sekali ke SETIAP instans server yang
+// melayani. Jumlah instans tidak bisa diketahui dari browser, jadi dimulai dari
+// dugaan (sebanyak permintaan paralel) lalu dinaikkan sendiri setiap kali ada
+// instans yang mengaku belum punya.
+const REF_TERKIRIM = new Map();   // ref_id -> sudah dikirim lengkap berapa kali
+const REF_JATAH = new Map();      // ref_id -> diperkirakan perlu berapa kali
 
 function gerbang(tugas) {
   return new Promise((resolve, reject) => {
@@ -1110,26 +1335,78 @@ function nilaiTake(dur, wajar) {
 // kebesaran. Mengulanginya hanya menambah beban dan mempercepat kena 429.
 const STATUS_PERMANEN = new Set([400, 401, 403, 404, 413, 422]);
 const MAX_COBA = 5;
+// Dua jenis pengulangan yang biayanya JAUH berbeda dan dulu digabung jadi satu:
+//   - gagal kirim (429/jaringan)  -> tidak menghasilkan audio, murah, boleh 5x.
+//   - durasi mencurigakan         -> audionya SUDAH jadi dan SUDAH dibayar;
+//                                    mengulang berarti membayar penuh sekali lagi.
+// Dengan MAX_COBA=5 satu potongan bisa ditagih 5 kali. Take ulang dibatasi 2
+// (artinya paling banyak satu kali bayar tambahan) karena pengukuran durasi
+// hanyalah tebakan kasar — percobaan ketiga dan seterusnya jarang lebih baik.
+const MAX_TAKE = 2;
+// Di bawah panjang ini tebakan durasi tidak bisa dipercaya: "Ya." yang wajar
+// 0,7 detik gampang jatuh di bawah ambang dan memicu take ulang yang percuma.
+const MIN_CHAR_UKUR = 60;
 
 async function speechChunk(input, voiceBody, prog) {
   const teks = normalizeForTTS(bersihkanTeks(input));   // "Lynk.id" -> "Lynk dot id"
   const wajar = durasiWajar(Math.max(teks.length, 1));
   const batasAtas = wajar * BATAS_ATAS, batasBawah = wajar * BATAS_BAWAH;
   const { refTrimmed, ...kirim } = voiceBody || {};   // penanda internal, jangan dikirim
+  // Audio referensi hanya perlu menyertai beberapa potongan pertama — cukup untuk
+  // mengisi setiap instans server yang melayani antrean paralel. Sisanya cukup
+  // membawa ref_id. Kalau ternyata ada instans yang belum punya, server menjawab
+  // 409 dan potongan itu dikirim ulang lengkap (lihat penanganan refMissing).
+  const refId = kirim.ref_id;
+  const punyaRef = Boolean(refId && kirim.ref_audio);
+  // Ambil satu "tiket" kiriman penuh kalau jatahnya masih ada; kalau tidak,
+  // potongan ini cukup membawa ref_id saja.
+  function ambilTiket() {
+    if (!punyaRef) return true;
+    const jatah = REF_JATAH.has(refId) ? REF_JATAH.get(refId) : LAJU.maksParalel;
+    const terkirim = REF_TERKIRIM.get(refId) || 0;
+    if (terkirim >= jatah) return false;
+    REF_TERKIRIM.set(refId, terkirim + 1);
+    return true;
+  }
+  let bawaAudio = ambilTiket(), ekstra = 0;
   const kabar = (m) => { if (prog) prog.set(0, m); };
   // Simpan take TERBAIK, bukan take terakhir. Versi lama mengembalikan percobaan
   // terakhir apa pun hasilnya — kalau percobaan terakhir yang paling ngelantur,
   // justru itu yang dipakai.
-  let terbaik = null, nilaiTerbaik = Infinity, sedangTunggu = false;
+  let terbaik = null, nilaiTerbaik = Infinity, sedangTunggu = false, take = 0;
 
   for (let a = 1; a <= MAX_COBA; a++) {
+    // Kuota sudah habis di potongan sebelumnya -> jangan kirim apa-apa lagi.
+    if (KUOTA_STOP) throw Object.assign(new Error("Batas pemakaian tercapai."), { quotaStop: true });
     let blob;
     try {
       // Lewat gerbang: jeda antar permintaan & masa dingin ditegakkan di sini.
-      blob = await gerbang(() => postJSON("/api/speech", { input: teks, ...kirim }, true));
+      const badan = { input: teks, ...kirim };
+      if (!bawaAudio) delete badan.ref_audio;          // hemat ±1,3 MB per potongan
+      blob = await gerbang(() => postJSON("/api/speech", badan, true));
       if (sedangTunggu) { kabar("Suara sedang dibuat…"); sedangTunggu = false; }
       lancar();
     } catch (e) {
+      // Batas pemakaian: mengulang tidak akan pernah berhasil, dan setiap
+      // percobaan tetap membebani server. Berhenti seketika.
+      if (e.quota) { terapkanKuota(e.quota); throw e; }
+      // Instans yang melayani belum punya audio referensinya. Ini pertanda
+      // kolam instans lebih besar dari dugaan: naikkan jatah, lalu kirim lengkap
+      // sekali lagi. Sengaja TIDAK menyondek berulang dengan permintaan kosong —
+      // setiap percobaan memakan satu slot gerbang (jeda antar permintaan), jadi
+      // menyondek menghemat byte tapi menukarnya dengan latensi yang lebih mahal.
+      if (e.refMissing && !bawaAudio && ekstra++ < 3) {
+        // Sekali sondekan dulu: percobaan berikutnya bisa mendarat di instans lain
+        // yang sudah punya, dan permintaan kosong hanya ±500 byte melawan ±1,3 MB.
+        // Kalau masih ditolak, naikkan jatah (kolam ternyata lebih besar dari
+        // dugaan) lalu kirim lengkap. Menyondek lebih dari sekali tidak dilakukan:
+        // tiap percobaan memakan satu slot gerbang, dan itu jadi lebih mahal.
+        if (ekstra > 1 && punyaRef) {
+          REF_JATAH.set(refId, (REF_JATAH.has(refId) ? REF_JATAH.get(refId) : LAJU.maksParalel) + 1);
+          bawaAudio = ambilTiket();
+        }
+        a--; continue;
+      }
       if (e.status && STATUS_PERMANEN.has(e.status)) throw e;   // diulang pun sia-sia
       if (a === MAX_COBA) { if (terbaik) return terbaik; throw e; }
       sedangTunggu = true;
@@ -1150,6 +1427,7 @@ async function speechChunk(input, voiceBody, prog) {
       }
       continue;
     }
+    take++;
     const dur = await measureDuration(blob);
     // Tidak terukur (browser gagal baca metadata) -> terima saja, jangan buang kuota.
     if (!dur) return blob;
@@ -1157,6 +1435,10 @@ async function speechChunk(input, voiceBody, prog) {
     if (nilai < nilaiTerbaik) { nilaiTerbaik = nilai; terbaik = blob; }
     // Cukup dekat dengan durasi wajar -> langsung pakai, tidak perlu ulang.
     if (dur <= batasAtas && dur >= batasBawah) return blob;
+    // Potongan pendek: hanya "ngelantur" yang layak diulang. Curiga "terpotong"
+    // pada teks sependek ini hampir selalu salah alarm.
+    if (dur < batasBawah && teks.length < MIN_CHAR_UKUR) return blob;
+    if (take >= MAX_TAKE) return terbaik || blob;        // jatah take ulang habis
     if (a < MAX_COBA) {
       kabar(dur > batasAtas
         ? "Hasil menyimpang dari teks — mengulang…"     // ngelantur
@@ -1219,9 +1501,10 @@ function doneCard(label) {
 $("tts-go").addEventListener("click", async () => {
   const text = $("tts-text").value.trim();
   if (!text) return setStatus($("tts-status"), "Isi teksnya dulu.", "err");
+  if (!bolehJalan("tts-go", text.length)) return;
   const voiceBody = { response_format: "wav", ...resolveVoice($("tts-voice").value) };
   const chunks = splitIntoChunks(text);
-  $("tts-go").disabled = true;
+  tandaiSibuk("tts-go", true);
   const prog = makeProgress($("tts-status"));
   try {
     const blobs = await runPool(
@@ -1238,17 +1521,19 @@ $("tts-go").addEventListener("click", async () => {
     out.appendChild(audioBlockFromBlob(hasil.blob, hasil.name));
     if (hasil.catatan) out.insertAdjacentHTML("beforeend", `<div class="hint">${hasil.catatan}</div>`);
     prog.finish("Selesai");
+    catatPemakaian(text.length);
     setTimeout(() => setStatus($("tts-status"), ""), 1500);
     afterGen();
-  } catch (e) { prog.fail(e.message); }
-  finally { $("tts-go").disabled = false; }
+  } catch (e) { prog.fail(e.quota ? e.quota.message : e.message); }
+  finally { tandaiSibuk("tts-go", false); }
 });
 
 // ---- Ekspresi ----
 $("expr-go").addEventListener("click", async () => {
   const text = $("expr-text").value.trim();
   if (!text) return setStatus($("expr-status"), "Isi teksnya dulu.", "err");
-  $("expr-go").disabled = true;
+  if (!bolehJalan("expr-go", text.length)) return;
+  tandaiSibuk("expr-go", true);
   const prog = makeProgress($("expr-status"));
   try {
     const body = { response_format: "wav", ...resolveVoice($("expr-voice").value) };
@@ -1261,10 +1546,11 @@ $("expr-go").addEventListener("click", async () => {
     out.innerHTML = doneCard("Suara Sudah Jadi");
     out.appendChild(audioBlockFromBlob(hasil.blob, hasil.name));
     prog.finish("Selesai");
+    catatPemakaian(text.length);
     setTimeout(() => setStatus($("expr-status"), ""), 1500);
     afterGen();
-  } catch (e) { prog.fail(e.message); }
-  finally { $("expr-go").disabled = false; }
+  } catch (e) { prog.fail(e.quota ? e.quota.message : e.message); }
+  finally { tandaiSibuk("expr-go", false); }
 });
 
 // ---- Kloning ----
@@ -1558,6 +1844,21 @@ function attachFilePicker(key, ids) {
   });
 }
 
+// Sidik jari isi referensi. Dipakai sebagai nama titipan di server supaya audio
+// yang sama tidak perlu diunggah berulang-ulang untuk satu pekerjaan.
+async function sidikRef(teks) {
+  try {
+    const buf = new TextEncoder().encode(teks);
+    const h = await crypto.subtle.digest("SHA-1", buf);
+    return Array.from(new Uint8Array(h)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 20);
+  } catch {
+    // Konteks tidak aman / crypto.subtle tidak ada -> cukup sidik sederhana.
+    let h = 5381;
+    for (let i = 0; i < teks.length; i++) h = ((h * 33) ^ teks.charCodeAt(i)) >>> 0;
+    return "s" + h.toString(16) + teks.length.toString(36);
+  }
+}
+
 // Ambil referensi suara sendiri (rekaman atau unggahan) sebagai data URL siap kirim.
 async function ownVoiceRef(key, ids) {
   const file = $(ids.file)?.files?.[0] || null;
@@ -1568,10 +1869,14 @@ async function ownVoiceRef(key, ids) {
     catch { OWN_CACHE[key] = { dataUrl: await blobToDataURL(src), trimmed: false }; }
   }
   const { dataUrl, trimmed } = OWN_CACHE[key];
+  if (!OWN_CACHE[key].id) OWN_CACHE[key].id = await sidikRef(dataUrl);
   const ref_text = (ids.reftext && $(ids.reftext) ? $(ids.reftext).value : "").trim();
   // Audio dipotong ke REF_MAX_SEC detik pertama -> transkrip tidak lagi cocok.
   // Mengirimkannya justru membuat model mengarang di awal kalimat.
-  return { ref_audio: dataUrl, ...(ref_text && !trimmed ? { ref_text } : {}), refTrimmed: trimmed };
+  return {
+    ref_audio: dataUrl, ref_id: OWN_CACHE[key].id,
+    ...(ref_text && !trimmed ? { ref_text } : {}), refTrimmed: trimmed,
+  };
 }
 
 const CLONE_IDS = { btn: "rec-btn", status: "rec-status", preview: "rec-preview",
@@ -1586,7 +1891,8 @@ $("clone-go").addEventListener("click", async () => {
   const punyaSuara = Boolean(OWN_REC.clone || $("clone-file").files[0]);
   if (!punyaSuara && !preset)
     return setStatus($("clone-status"), "Rekam suara, unggah audio, atau pilih preset.", "err");
-  $("clone-go").disabled = true;
+  if (!bolehJalan("clone-go", text.length)) return;
+  tandaiSibuk("clone-go", true);
   const prog = makeProgress($("clone-status"), "Menyiapkan audio referensi…");
   try {
     // Siapkan "suara" SEKALI, lalu dipakai ulang untuk semua potongan.
@@ -1611,10 +1917,11 @@ $("clone-go").addEventListener("click", async () => {
     out.appendChild(audioBlockFromBlob(hasil.blob, hasil.name));
     if (hasil.catatan) out.insertAdjacentHTML("beforeend", `<div class="hint">${hasil.catatan}</div>`);
     prog.finish("Selesai");
+    catatPemakaian(text.length);
     setTimeout(() => setStatus($("clone-status"), ""), 1500);
     afterGen();
-  } catch (e) { prog.fail(e.message); }
-  finally { $("clone-go").disabled = false; }
+  } catch (e) { prog.fail(e.quota ? e.quota.message : e.message); }
+  finally { tandaiSibuk("clone-go", false); }
 });
 
 // ---- Multi (podcast + book): loop per baris di sisi klien ----
@@ -1636,12 +1943,15 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix, doneLabe
   if (!script) return setStatus($(statusId), "Skrip masih kosong.", "err");
   const turns = parseScript(script);
   if (!turns.length) return setStatus($(statusId), "Skrip kosong.", "err");
+  // Yang dihitung adalah teks yang benar-benar diucapkan, tanpa label "Speaker 0:".
+  const jumlahKarakter = turns.reduce((n, t) => n + t.text.length, 0);
+  if (!bolehJalan(btn.id, jumlahKarakter)) return;
 
-  btn.disabled = true;
+  tandaiSibuk(btn.id, true);
   const prog = makeProgress($(statusId), "Menyiapkan suara…");
   let speakers;
   try { speakers = await collectSpeakers(hostId); }
-  catch (e) { prog.fail(e.message); btn.disabled = false; return; }
+  catch (e) { prog.fail(e.message); tandaiSibuk(btn.id, false); return; }
 
   // Giliran yang panjang tetap dipecah, tapi potongannya digabung lagi per giliran.
   const jobs = [];
@@ -1656,7 +1966,7 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix, doneLabe
     const results = await runPool(
       jobs,
       (j) => speechChunk(j.c, { response_format: "wav", ...(speakers[turns[j.ti].speaker] || speakers[0] || {}) }, prog)
-               .catch(() => null),
+               .catch((e) => { if (e.quota || e.quotaStop) throw e; return null; }),
       conc,
       (done, tot) => prog.set(5 + (done / tot) * 88)
     );
@@ -1700,10 +2010,11 @@ async function runMulti(scriptId, hostId, statusId, outId, btn, prefix, doneLabe
     out.appendChild(lbl); out.appendChild(segs);
 
     prog.finish("Selesai");
+    catatPemakaian(jumlahKarakter);
     setTimeout(() => setStatus($(statusId), ""), 1500);
     afterGen();
-  } catch (e) { prog.fail(e.message); }
-  finally { btn.disabled = false; }
+  } catch (e) { prog.fail(e.quota ? e.quota.message : e.message); }
+  finally { tandaiSibuk(btn.id, false); }
 }
 $("pod-go").addEventListener("click", () => runMulti("pod-script", "pod-speakers", "pod-status", "pod-out", $("pod-go"), "podcast", "Podcast Sudah Jadi"));
 $("book-go").addEventListener("click", () => runMulti("book-script", "book-speakers", "book-status", "book-out", $("book-go"), "buku-audio", "Buku Audio Sudah Jadi"));
@@ -1712,7 +2023,9 @@ $("book-go").addEventListener("click", () => runMulti("book-script", "book-speak
 $("batch-go").addEventListener("click", async () => {
   const lines = $("batch-text").value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (!lines.length) return setStatus($("batch-status"), "Belum ada baris teks.", "err");
-  $("batch-go").disabled = true;
+  const jumlahKarakter = lines.reduce((n, l) => n + l.length, 0);
+  if (!bolehJalan("batch-go", jumlahKarakter)) return;
+  tandaiSibuk("batch-go", true);
   const prog = makeProgress($("batch-status"));
   const out = $("batch-out"); out.innerHTML = `<label class="field">Hasil (${lines.length})</label>`;
   const v = resolveVoice($("batch-voice").value);
@@ -1727,15 +2040,18 @@ $("batch-go").addEventListener("click", async () => {
       out.appendChild(d);
     } catch (e) {
       const d = document.createElement("div"); d.className = "seg";
-      d.innerHTML = `<div class="txt" style="color:var(--danger)">${i + 1}. Gagal: ${e.message}</div>`;
+      d.innerHTML = `<div class="txt" style="color:var(--danger)">${i + 1}. Gagal: ${(e.quota ? e.quota.message : e.message)}</div>`;
       out.appendChild(d);
+      // Kuota habis: baris sisanya pasti ditolak juga, jadi berhenti di sini.
+      if (e.quota || e.quotaStop) { prog.fail(e.quota ? e.quota.message : e.message); tandaiSibuk("batch-go", false); return; }
     }
     prog.set(((i + 1) / lines.length) * 98);
   }
   prog.finish("Selesai");
+  catatPemakaian(jumlahKarakter);
   setTimeout(() => setStatus($("batch-status"), ""), 1500);
   afterGen();
-  $("batch-go").disabled = false;
+  tandaiSibuk("batch-go", false);
 });
 
 init();
